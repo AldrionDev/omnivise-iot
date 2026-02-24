@@ -1,0 +1,45 @@
+# --- Security & Credentials ---
+.env
+*.pem
+*.key
+
+# --- Java / Maven ---
+target/
+*.class
+*.jar
+*.war
+*.ear
+.mvn/wrapper/maven-wrapper.jar
+
+
+# --- Docker ---
+# Ha a docker adatokat egy helyi mappába mentenéd
+mongo_data/
+
+# --- Node.js / React (Frontend) ---
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+build/
+dist/
+
+# --- IDEs & Editors ---
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+.classpath
+.project
+.settings/
+
+# --- Operating System Files ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Infrastructure ---
+.terraform/
+*.tfstate
+*.tfstate.backup
