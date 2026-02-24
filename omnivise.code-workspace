@@ -1,44 +1,45 @@
 {
-	"folders": [
-		{
-			"name": "ROOT (Config & Deploy)",
-			"path": "."
-		},
-		{
-			"name": "BACKEND (Java)",
-			"path": "backend"
-		},
-		{
-			"name": "FRONTEND (React)",
-			"path": "frontend"
-		}
-	],
-	"settings": {
-		// --- Általános formázás ---
-		"editor.formatOnSave": true,
-		"editor.codeActionsOnSave": {
-			"source.organizeImports": "explicit"
-		},
-		
-		// --- Java specifikus beállítások ---
-		"[java]": {
-			"editor.defaultFormatter": "redhat.java",
-			"editor.tabSize": 4,
-			"editor.insertSpaces": true
-		},
+  "folders": [
+    {
+      "name": "ROOT (Config & Deploy)",
+      "path": ".",
+    },
+    {
+      "name": "BACKEND (Java)",
+      "path": "backend",
+    },
+    {
+      "name": "FRONTEND (React)",
+      "path": "frontend",
+    },
+  ],
+  "settings": {
+    // --- Általános formázás ---
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "source.organizeImports": "explicit",
+    },
 
-		// --- Frontend (JS/JSON/CSS) specifikus ---
-		"[javascript]": {
-			"editor.defaultFormatter": "esbenp.prettier-vscode",
-			"editor.tabSize": 2
-		},
-		"[json]": {
-			"editor.defaultFormatter": "vscode.json-language-features",
-			"editor.tabSize": 2
-		},
+    // --- Java specifikus beállítások ---
+    "[java]": {
+      "editor.defaultFormatter": "redhat.java",
+      "editor.tabSize": 4,
+      "editor.insertSpaces": true,
+    },
 
-		// --- Copilot stílus erősítése ---
-		"github.copilot.editor.enableAutoCompletions": true,
-		"github.copilot.chat.scope": "workspace"
-	}
+    // --- Frontend (JS/JSON/CSS) specifikus ---
+    "[javascript]": {
+      "editor.defaultFormatter": "esbenp.prettier-vscode",
+      "editor.tabSize": 2,
+    },
+    "[json]": {
+      "editor.defaultFormatter": "vscode.json-language-features",
+      "editor.tabSize": 2,
+    },
+
+    // --- Copilot stílus erősítése ---
+    "github.copilot.editor.enableAutoCompletions": true,
+    "github.copilot.chat.scope": "workspace",
+    "java.configuration.updateBuildConfiguration": "interactive",
+  },
 }
