@@ -26,7 +26,8 @@ public class Main {
 
         System.out.println("🚀 Starting OmniVise-IoT Backend...");
         System.out.println("📂 .env file loaded: " + getDotenvPath());
-        System.out.println("🔌 MongoDB URI: " + mongoUri);
+        String maskedUri = mongoUri.replaceAll("://.*@", "://***:***@");
+        System.out.println("🔌 MongoDB URI: " + maskedUri);
         System.out.println("🌐 Port: " + port);
 
         // Javalin app create and start
@@ -99,7 +100,11 @@ public class Main {
      * Helper function for querying environment variables
      */
     public static String getEnv(String key) {
-        return dotenv.get(key);
+        String value = dotenv.get(key);
+        if (value == null) {
+            throw new IllegalStateException("Missing required environment variable:" + key);
+        }
+        return value;
     }
 
     public static String getEnv(String key, String defaultValue) {
