@@ -20,6 +20,15 @@ public class SensorService {
 
     private final MongoCollection<Document> collection;
 
+    /**
+     * Initializes the SensorService and establishes connection to MongoDB.
+     * Creates a MongoDB client, connects to the specified database,
+     * and retrieves the 'sensor_readings' collection.
+     * 
+     * @param mongoUri The MongoDB connection URI (e.g.,
+     *                 "mongodb://user:pass@host:27017")
+     * @param database Database name to connect to (e.g., "omnivise_iot")
+     */
     public SensorService(String mongoUri, String database) {
         MongoClient mongoClient = MongoClients.create(mongoUri);
         MongoDatabase db = mongoClient.getDatabase(database);
@@ -27,6 +36,13 @@ public class SensorService {
         System.out.println("✅ MongoDB connected: " + database + ".sensor_readings");
     }
 
+    /**
+     * Retrieves the latest sensor readings from the database.
+     * Results are sorted by timestamp in descending order (newest first).
+     * 
+     * @param limit The maximum number of readings to return
+     * @return List of SensorReading objects, sorted by timestamp (newest first)
+     */
     public List<SensorReading> getLatestReadings(int limit) {
         List<SensorReading> readings = new ArrayList<>();
 
@@ -38,6 +54,12 @@ public class SensorService {
         return readings;
     }
 
+    /**
+     * Helper method to convert a MongoDB Document into a SensorReading record.
+     * 
+     * @param doc The MongoDB document from the sensor_readings collection
+     * @return A SensorReading object with mapped fields from the document
+     */
     private SensorReading documentToReading(Document doc) {
         return new SensorReading(
                 doc.getString("sensor_id"),
@@ -48,6 +70,15 @@ public class SensorService {
                 doc.getDate("timestamp").toString());
     }
 
+    /**
+     * Retrieves sensor readings filtered by sensor type.
+     * Results are sorted by timestamp in descending order (newest first).
+     * 
+     * @param type  The sensor type to filter by (e.g., "temperature")
+     * @param limit The maximum number of readings to return
+     * @return List of SensorReading objects, sorted by timestamp (newest first)
+     * 
+     */
     public List<SensorReading> getReadingsByType(String type, int limit) {
         List<SensorReading> readings = new ArrayList<>();
         collection.find(new Document("type", type))
@@ -57,6 +88,14 @@ public class SensorService {
         return readings;
     }
 
+    /**
+     * Retrieves sensor readings filtered by location.
+     * Results are sorted by timestamp in descending order (newest first).
+     * 
+     * @param location The location to filter by (e.g., "living_room")
+     * @param limit    The maximum number of readings to return
+     * @return List of SensorReading objects from the specified location.
+     */
     public List<SensorReading> getReadingsByLocation(String location, int limit) {
         List<SensorReading> readings = new ArrayList<>();
         collection.find(new Document("location", location))
