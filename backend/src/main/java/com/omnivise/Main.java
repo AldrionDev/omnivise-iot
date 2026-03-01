@@ -2,6 +2,10 @@ package com.omnivise;
 
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.List;
+
+import com.omnivise.model.SensorReading;
+import com.omnivise.service.SensorService;
 
 import io.github.cdimascio.dotenv.Dotenv;
 import io.javalin.Javalin;
@@ -21,6 +25,8 @@ public class Main {
         String mongoUri = String.format("mongodb://%s:%s@%s:%s",
                 mongoUser, mongoPassword, mongoHost, mongoPort);
 
+        String mongoDatabase = dotenv.get("MONGO_DATABASE", "omnivise_iot");
+
         // Port setting from .env or default to 8080
         int port = Integer.parseInt(dotenv.get("BACKEND_PORT", "8080"));
 
@@ -29,6 +35,19 @@ public class Main {
         String maskedUri = mongoUri.replaceAll("://.*@", "://***:***@");
         System.out.println("🔌 MongoDB URI: " + maskedUri);
         System.out.println("🌐 Port: " + port);
+
+        // Initialize MongoDB service
+        SensorService sensorService = new SensorService(mongoUri, mongoDatabase);
+
+        // Test MongoDB connection by fetching 5 latest readings
+        List<SensorReading> testLatestReadings = sensorService.getLatestReadings(5);
+        System.out.println("📊 Latest 5 sensor readings: " + testLatestReadings.size() + " found");
+        if (!testLatestReadings.isEmpty()) {
+            System.out.println(
+                    " - Example: " + testLatestReadings.get(0).sensorId() + " | " + testLatestReadings.get(0).type()
+                            + " | " + testLatestReadings.get(0).value() + " " + testLatestReadings.get(0).unit() + " | "
+                            + testLatestReadings.get(0).location() + " | " + testLatestReadings.get(0).timestamp());
+        }
 
         // Javalin app create and start
         Javalin app = Javalin.create(config -> {
