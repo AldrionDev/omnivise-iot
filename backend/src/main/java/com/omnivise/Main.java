@@ -4,6 +4,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
 
+import com.omnivise.handler.WebSocketHandler;
 import com.omnivise.model.SensorReading;
 import com.omnivise.service.SensorService;
 
@@ -39,6 +40,10 @@ public class Main {
         // Initialize MongoDB service
         SensorService sensorService = new SensorService(mongoUri, mongoDatabase);
 
+        // Initialize WebSocket handler
+        WebSocketHandler wsHandler = new WebSocketHandler();
+        System.out.println("🔌 WebSocket handler initialized");
+
         // Test MongoDB connection by fetching 5 latest readings
         List<SensorReading> testLatestReadings = sensorService.getLatestReadings(5);
         System.out.println("📊 Latest 5 sensor readings: " + testLatestReadings.size() + " found");
@@ -62,6 +67,11 @@ public class Main {
             });
 
         }).start(port);
+
+        /**
+         * Define WebSocket endpoint
+         */
+        app.ws("/ws/sensors", wsHandler.getWebSocketConfig());
 
         /**
          * Define REST API endpoints
@@ -100,7 +110,9 @@ public class Main {
         });
 
         System.out.println("✅ Server running at http://localhost:" + port);
-        System.out.println("\n Available API endpoints:");
+        System.out.println("\n📡 WebSocket endpoint:");
+        System.out.println("   WS   /ws/sensors");
+        System.out.println("\n📋 REST API endpoints:");
         System.out.println("   GET  /");
         System.out.println("   GET  /health");
         System.out.println("   GET  /api/sensors/latest?limit=50");
