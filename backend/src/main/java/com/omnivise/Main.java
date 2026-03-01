@@ -53,7 +53,19 @@ public class Main {
         Javalin app = Javalin.create(config -> {
             config.showJavalinBanner = false;
             config.http.defaultContentType = "application/json";
+
+            // Enable CORS for frontend (React app on different port)
+            config.bundledPlugins.enableCors(cors -> {
+                cors.addRule(it -> {
+                    it.anyHost();
+                });
+            });
+
         }).start(port);
+
+        /**
+         * Define REST API endpoints
+         */
 
         // Base endpoint
         app.get("/", ctx -> ctx.json(new Response("OmniVise-IoT API", "v1.0")));
@@ -61,7 +73,39 @@ public class Main {
         // Health check endpoint
         app.get("/health", ctx -> ctx.json(new Response("status", "healthy")));
 
+        // Get latest sensor readings
+        // GET /api/sensors/latest?limit=50
+        app.get("/api/sensors/latest", ctx -> {
+            int limit = ctx.queryParamAsClass("limit", Integer.class).getOrDefault(50);
+            List<SensorReading> readings = sensorService.getLatestReadings(limit);
+            ctx.json(readings);
+        });
+
+        // Get readings by type
+        // GET /api/sensors/type/{type}?limit=50
+        app.get("/api/sensors/type/{type}", ctx -> {
+            String type = ctx.pathParam("type");
+            int limit = ctx.queryParamAsClass("limit", Integer.class).getOrDefault(50);
+            List<SensorReading> readings = sensorService.getReadingsByType(type, limit);
+            ctx.json(readings);
+        });
+
+        // Get readings by location
+        // GET /api/sensors/location/{location}?limit=50
+        app.get("/api/sensors/location/{location}", ctx -> {
+            String location = ctx.pathParam("location");
+            int limit = ctx.queryParamAsClass("limit", Integer.class).getOrDefault(50);
+            List<SensorReading> readings = sensorService.getReadingsByLocation(location, limit);
+            ctx.json(readings);
+        });
+
         System.out.println("✅ Server running at http://localhost:" + port);
+        System.out.println("\n Available API endpoints:");
+        System.out.println("   GET  /");
+        System.out.println("   GET  /health");
+        System.out.println("   GET  /api/sensors/latest?limit=50");
+        System.out.println("   GET  /api/sensors/type/{type}?limit=50");
+        System.out.println("   GET  /api/sensors/location/{location}?limit=50");
     }
 
     /**

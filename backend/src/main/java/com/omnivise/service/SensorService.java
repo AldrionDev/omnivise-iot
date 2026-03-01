@@ -61,13 +61,22 @@ public class SensorService {
      * @return A SensorReading object with mapped fields from the document
      */
     private SensorReading documentToReading(Document doc) {
+        Object timestampObj = doc.get("timestamp");
+        String timestamp;
+        if (timestampObj instanceof java.util.Date) {
+            timestamp = timestampObj.toString();
+        } else if (timestampObj instanceof String) {
+            timestamp = (String) timestampObj;
+        } else {
+            timestamp = String.valueOf(timestampObj);
+        }
         return new SensorReading(
                 doc.getString("sensor_id"),
                 doc.getString("type"),
                 doc.get("value"),
                 doc.getString("unit"),
                 doc.getString("location"),
-                doc.getDate("timestamp").toString());
+                timestamp);
     }
 
     /**
