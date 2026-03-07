@@ -5,6 +5,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.omnivise.model.SensorReading;
 
 import io.javalin.websocket.WsConfig;
@@ -21,6 +22,8 @@ public class WebSocketHandler {
     private final Map<WsContext, String> clients = new ConcurrentHashMap<>();
     // Generate unique session IDs for logging
     private final AtomicInteger sessionCounter = new AtomicInteger(0);
+    // JSON serializer for WebSocket messages
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     /**
      * Configures WebSocket endpoint handlers.
@@ -56,14 +59,23 @@ public class WebSocketHandler {
         if (clients.isEmpty()) {
             return;
         }
-        clients.forEach((ctx, sessionId) -> {
-            try {
-                ctx.send(reading.toString());
-            } catch (Exception e) {
-                System.err.println("⚠️ Failed to send WebSocket message to " + sessionId);
-                e.printStackTrace();
-            }
-        });
+        
+        try {
+            // Serialize SensorReading to JSON
+            String jsonMessage = objectMapper.writeValueAsString(reading);
+            
+            clients.forEach((ctx, sessionId) -> {
+                try {
+                    ctx.send(jsonMessage);
+                } catch (Exception e) {
+                    System.err.println("⚠️ Failed to send WebSocket message to " + sessionId);
+                    e.printStackTrace();
+                }
+            });
+        } catch (Exception e) {
+            System.err.println("⚠️ Failed to serialize SensorReading to JSON: " + e.getMessage());
+            e.printStackTrace();
+        }
     }
 
     public int getClientCount() {
