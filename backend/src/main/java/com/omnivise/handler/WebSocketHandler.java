@@ -59,11 +59,11 @@ public class WebSocketHandler {
         if (clients.isEmpty()) {
             return;
         }
-        
+
         try {
             // Serialize SensorReading to JSON
             String jsonMessage = objectMapper.writeValueAsString(reading);
-            
+
             clients.forEach((ctx, sessionId) -> {
                 try {
                     ctx.send(jsonMessage);
