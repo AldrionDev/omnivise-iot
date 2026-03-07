@@ -19,13 +19,10 @@ public class Main {
         // Load the .env file from the project root
         dotenv = loadDotenvFromProjectRoot();
 
-        // MongoDB connection string composed from .env variables or defaults
-        String mongoUser = dotenv.get("MONGO_USER", "admin");
-        String mongoPassword = dotenv.get("MONGO_PASSWORD", "password");
+        // MongoDB connection string (no authentication for dev)
         String mongoHost = dotenv.get("MONGO_HOST", "localhost");
         String mongoPort = dotenv.get("MONGO_PORT", "27017");
-        String mongoUri = String.format("mongodb://%s:%s@%s:%s",
-                mongoUser, mongoPassword, mongoHost, mongoPort);
+        String mongoUri = String.format("mongodb://%s:%s", mongoHost, mongoPort);
 
         String mongoDatabase = dotenv.get("MONGO_DATABASE", "omnivise_iot");
 
@@ -34,8 +31,7 @@ public class Main {
 
         System.out.println("🚀 Starting OmniVise-IoT Backend...");
         System.out.println("📂 .env file loaded: " + getDotenvPath());
-        String maskedUri = mongoUri.replaceAll("://.*@", "://***:***@");
-        System.out.println("🔌 MongoDB URI: " + maskedUri);
+        System.out.println("🔌 MongoDB URI: " + mongoUri);
         System.out.println("🌐 Port: " + port);
 
         // Initialize MongoDB service
