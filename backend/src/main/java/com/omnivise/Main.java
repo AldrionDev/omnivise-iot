@@ -6,6 +6,7 @@ import java.util.List;
 
 import com.omnivise.handler.WebSocketHandler;
 import com.omnivise.model.SensorReading;
+import com.omnivise.service.SensorChangeStreamListener;
 import com.omnivise.service.SensorService;
 
 import io.github.cdimascio.dotenv.Dotenv;
@@ -43,6 +44,12 @@ public class Main {
         // Initialize WebSocket handler
         WebSocketHandler wsHandler = new WebSocketHandler();
         System.out.println("🔌 WebSocket handler initialized");
+
+        // Initialize and start MongoDB Change Stream Listener
+        SensorChangeStreamListener changeStreamListener = new SensorChangeStreamListener(
+                sensorService.getCollection(),
+                wsHandler);
+        changeStreamListener.start();
 
         // Test MongoDB connection by fetching 5 latest readings
         List<SensorReading> testLatestReadings = sensorService.getLatestReadings(5);

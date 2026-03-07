@@ -113,4 +113,13 @@ public class SensorService {
                 .forEach(doc -> readings.add(documentToReading(doc)));
         return readings;
     }
+
+    /**
+     * Returns the MongoDB collection for Change Stream listening.
+     * 
+     * @return The sensor_readings MongoDB collection
+     */
+    public MongoCollection<Document> getCollection() {
+        return collection;
+    }
 }
