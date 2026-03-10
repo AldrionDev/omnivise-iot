@@ -19,19 +19,31 @@ public class Main {
         // Load the .env file from the project root
         dotenv = loadDotenvFromProjectRoot();
 
-        // MongoDB connection string (no authentication for dev)
-        String mongoHost = dotenv.get("MONGO_HOST", "localhost");
-        String mongoPort = dotenv.get("MONGO_PORT", "27017");
-        String mongoUri = String.format("mongodb://%s:%s", mongoHost, mongoPort);
+        // MongoDB connection string with authentication
+        // Use getEnvVar() which falls back to System.getenv() if dotenv is not
+        // available
+        String mongoHost = getEnvVar("MONGO_HOST", "localhost");
+        String mongoPort = getEnvVar("MONGO_PORT", "27017");
+        String mongoUser = getEnvVar("MONGO_USER", null);
+        String mongoPassword = getEnvVar("MONGO_PASSWORD", null);
 
-        String mongoDatabase = dotenv.get("MONGO_DATABASE", "omnivise_iot");
+        String mongoUri;
+        if (mongoUser != null && mongoPassword != null && !mongoUser.isEmpty() && !mongoPassword.isEmpty()) {
+            mongoUri = String.format("mongodb://%s:%s@%s:%s/?directConnection=true",
+                    mongoUser, mongoPassword, mongoHost, mongoPort);
+        } else {
+            mongoUri = String.format("mongodb://%s:%s", mongoHost, mongoPort);
+        }
+
+        String mongoDatabase = getEnvVar("MONGO_DATABASE", "omnivise_iot");
 
         // Port setting from .env or default to 8080
-        int port = Integer.parseInt(dotenv.get("BACKEND_PORT", "8080"));
+        int port = Integer.parseInt(getEnvVar("BACKEND_PORT", "8080"));
 
         System.out.println("🚀 Starting OmniVise-IoT Backend...");
         System.out.println("📂 .env file loaded: " + getDotenvPath());
-        System.out.println("🔌 MongoDB URI: " + mongoUri);
+        System.out.println("🔌 MongoDB URI: "
+                + (mongoUser != null ? "mongodb://" + mongoUser + ":***@" + mongoHost + ":" + mongoPort : mongoUri));
         System.out.println("🌐 Port: " + port);
 
         // Initialize MongoDB service
@@ -172,6 +184,23 @@ public class Main {
         }
 
         return "nincs .env fájl";
+    }
+
+    /**
+     * Get environment variable with fallback to System.getenv()
+     * This works both in development (with .env file) and in Docker (with env vars)
+     */
+    private static String getEnvVar(String key, String defaultValue) {
+        // First try dotenv (for local development)
+        String value = dotenv.get(key);
+
+        // If not found, try System.getenv() (for Docker containers)
+        if (value == null || value.isEmpty()) {
+            value = System.getenv(key);
+        }
+
+        // If still not found, use default value
+        return (value != null && !value.isEmpty()) ? value : defaultValue;
     }
 
     /**

@@ -121,8 +121,9 @@ public class SensorDataSimulator {
                 unit = "%";
                 break;
             case "motion":
-                value = random.nextBoolean();
-                unit = "boolean";
+                boolean motionDetected = random.nextBoolean();
+                value = motionDetected ? 1 : 0; // 1 for motion detected, 0 for no motion
+                unit = motionDetected ? "detected" : "no motion";
                 break;
             case "light":
                 value = random.nextInt(1000); // 0-1000 lux

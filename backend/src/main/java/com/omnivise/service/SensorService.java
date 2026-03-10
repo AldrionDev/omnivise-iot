@@ -38,16 +38,17 @@ public class SensorService {
 
     /**
      * Retrieves the latest sensor readings from the database.
-     * Results are sorted by timestamp in descending order (newest first).
+     * Results are sorted by _id in descending order (newest first).
+     * Using _id ensures chronological ordering regardless of timestamp format.
      * 
      * @param limit The maximum number of readings to return
-     * @return List of SensorReading objects, sorted by timestamp (newest first)
+     * @return List of SensorReading objects, sorted by _id (newest first)
      */
     public List<SensorReading> getLatestReadings(int limit) {
         List<SensorReading> readings = new ArrayList<>();
 
         collection.find()
-                .sort(new Document("timestamp", -1))
+                .sort(new Document("_id", -1))
                 .limit(limit)
                 .forEach(doc -> readings.add(documentToReading(doc)));
 
@@ -81,17 +82,17 @@ public class SensorService {
 
     /**
      * Retrieves sensor readings filtered by sensor type.
-     * Results are sorted by timestamp in descending order (newest first).
+     * Results are sorted by _id in descending order (newest first).
      * 
      * @param type  The sensor type to filter by (e.g., "temperature")
      * @param limit The maximum number of readings to return
-     * @return List of SensorReading objects, sorted by timestamp (newest first)
+     * @return List of SensorReading objects, sorted by _id (newest first)
      * 
      */
     public List<SensorReading> getReadingsByType(String type, int limit) {
         List<SensorReading> readings = new ArrayList<>();
         collection.find(new Document("type", type))
-                .sort(new Document("timestamp", -1))
+                .sort(new Document("_id", -1))
                 .limit(limit)
                 .forEach(doc -> readings.add(documentToReading(doc)));
         return readings;
@@ -99,7 +100,7 @@ public class SensorService {
 
     /**
      * Retrieves sensor readings filtered by location.
-     * Results are sorted by timestamp in descending order (newest first).
+     * Results are sorted by _id in descending order (newest first).
      * 
      * @param location The location to filter by (e.g., "living_room")
      * @param limit    The maximum number of readings to return
@@ -108,7 +109,7 @@ public class SensorService {
     public List<SensorReading> getReadingsByLocation(String location, int limit) {
         List<SensorReading> readings = new ArrayList<>();
         collection.find(new Document("location", location))
-                .sort(new Document("timestamp", -1))
+                .sort(new Document("_id", -1))
                 .limit(limit)
                 .forEach(doc -> readings.add(documentToReading(doc)));
         return readings;
