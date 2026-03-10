@@ -6,6 +6,9 @@ import {
   Thermometer,
 } from "lucide-react";
 import { useEffect, useState } from "react";
+import FilterPanel from "./components/FilterPanel";
+import SensorCard from "./components/SensorCard";
+import SensorTable from "./components/SensorTable";
 
 function App() {
   // WebSocket connection state
@@ -19,6 +22,29 @@ function App() {
     humidity: "--",
     light: "--",
     pressure: "--",
+  });
+
+  const [searchTerm, setSearchTerm] = useState("");
+  const [typeFilter, setTypeFilter] = useState("all");
+  const [locationFilter, setLocationFilter] = useState("all");
+
+  // Filtered data based on search and filters
+  const filteredData = sensorData.filter((reading) => {
+    const matchesSearch =
+      searchTerm === "" ||
+      // Search term filter (sensor ID or location contains the search term)
+      reading.sensorId.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      reading.location.toLowerCase().includes(searchTerm.toLowerCase());
+
+    // Type filter
+    const matchesType = typeFilter === "all" || reading.type === typeFilter;
+
+    // Location filter
+    const matchesLocation =
+      locationFilter === "all" || reading.location === locationFilter;
+
+    //Include only if All filters match
+    return matchesSearch && matchesType && matchesLocation;
   });
 
   useEffect(() => {
@@ -135,79 +161,25 @@ function App() {
             />
           </div>
 
+          {/* Filter Panel */}
+          <FilterPanel
+            searchTerm={searchTerm}
+            onSearchChange={setSearchTerm}
+            typeFilter={typeFilter}
+            onTypeChange={setTypeFilter}
+            locationFilter={locationFilter}
+            onLocationChange={setLocationFilter}
+            onClearFilters={() => {
+              setSearchTerm("");
+              setTypeFilter("all");
+              setLocationFilter("all");
+            }}
+          />
+
           {/* Data Table */}
-          <div className="bg-white shadow rounded-lg p-6">
-            <h2 className="text-xl font-semibold mb-4">
-              Recent Sensor Readings
-            </h2>
-            {sensorData.length === 0 ? (
-              <p className="text-gray-500 text-center py-8">
-                No sensor data yet. Connect to WebSocket to receive real-time
-                updates.
-              </p>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="min-w-full divide-y divide-gray-200">
-                  <thead className="bg-gray-50">
-                    <tr>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Sensor ID
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Type
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Value
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Location
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Timestamp
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody className="bg-white divide-y divide-gray-200">
-                    {sensorData.map((reading, index) => (
-                      <tr key={index}>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
-                          {reading.sensorId}
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                          {reading.type}
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                          {reading.value} {reading.unit}
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                          {reading.location}
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                          {reading.timestamp}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
+          <SensorTable data={filteredData} hasData={sensorData.length > 0} />
         </div>
       </main>
-    </div>
-  );
-}
-
-// Sensor Card Component
-function SensorCard({ icon, title, value, unit, color }) {
-  return (
-    <div className="bg-white shadow rounded-lg p-6">
-      <div className="flex items-center justify-between mb-2">
-        <div className={color}>{icon}</div>
-        <span className="text-2xl font-bold">{value}</span>
-      </div>
-      <p className="text-gray-600 text-sm">{title}</p>
-      <p className="text-gray-400 text-xs">{unit}</p>
     </div>
   );
 }
