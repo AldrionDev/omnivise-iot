@@ -49,7 +49,7 @@ function App() {
 
   useEffect(() => {
     // WebSocket URL (backend)
-    const wsUrl = "ws://localhost:8080/ws/sensors";
+    const wsUrl = import.meta.env.VITE_WS_URL || "ws://localhost:8080/ws/sensors";
     const ws = new WebSocket(wsUrl);
 
     // When connection opens
