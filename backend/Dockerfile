@@ -16,6 +16,9 @@ RUN mvn clean package -DskipTests
 # ============================================
 FROM eclipse-temurin:21-jre-alpine
 
+# Install wget for healthcheck
+RUN apk add --no-cache wget
+
 WORKDIR /app
 
 # Copy ONLY the fat JAR (exclude original-*)
