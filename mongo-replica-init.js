@@ -1,4 +1,3 @@
-// mongo-replica-init.js
 // Initializes MongoDB as a single-node replica set for Change Stream support
 
 try {
@@ -11,12 +10,12 @@ try {
 
   const config = {
     _id: "rs0",
-    members: [{ _id: 0, host: "localhost:27017" }],
+    members: [{ _id: 0, host: "mongodb:27017" }], // ✅ Docker hostname!
   };
 
   rs.initiate(config);
 
   print("✅ Replica set initialized successfully!");
   print("   Name: rs0");
-  print("   Primary: localhost:27017");
+  print("   Primary: mongodb:27017");
 }
