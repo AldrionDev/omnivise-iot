@@ -57,9 +57,13 @@ The reviewer should receive:
 - the GitHub issue
 - the repository state
 - the implementation diff
-- relevant test and verification results
+- the objective Verification Record
 
-The reviewer should not rely on the implementer's reasoning or self-assessment as evidence of correctness.
+The reviewer should not rely on the implementer's reasoning or self-assessment as
+evidence of correctness.
+
+The reviewer may rely on the objective Verification Record as execution evidence
+and may independently repeat any relevant checks.
 
 ---
 
@@ -73,14 +77,17 @@ For each implementation issue:
 4. Inspect the relevant repository files and documentation.
 5. Produce a short technical implementation plan.
 6. Implement only the defined issue Scope.
-7. Run relevant deterministic verification checks.
-8. Perform an independent review.
-9. Fix blocking review findings.
-10. Re-run relevant deterministic verification.
-11. Repeat the review/fix cycle at most two times.
-12. Create a commit and pull request only when the required gates pass.
-13. Human reviews the pull request.
-14. Human performs the final merge.
+7. Run relevant `VERIFY_WORKTREE` deterministic checks and produce a Verification Record.
+8. Perform an independent review using the issue, implementation diff, and Verification Record.
+9. Fix blocking review findings when required.
+10. Re-run `VERIFY_WORKTREE` and produce an updated Verification Record after implementation changes.
+11. Repeat implementation correction and fresh review at most two times.
+12. Resolve any required Human Gates / Maintainer Decisions.
+13. Stage only the intended issue changes.
+14. Run `VERIFY_STAGED` checks against the exact commit candidate.
+15. Create a commit and pull request only when the required gates pass.
+16. Human reviews the pull request.
+17. Human performs the final merge.
 
 ---
 
@@ -233,6 +240,34 @@ If a required check cannot be executed, document:
 
 ---
 
+## Verification Record
+
+After implementation, deterministic verification must produce an objective
+Verification Record.
+
+The Verification Record is passed to the independent reviewer together with the
+issue contract and implementation diff.
+
+It must contain:
+
+- exact commands executed
+- command results or exit status
+- relevant test counts where available
+- checks that could not be run
+- documented reasons for checks considered not applicable
+- relevant deterministic observations such as Git state
+
+The Verification Record is evidence.
+
+It must not contain or substitute:
+
+- implementer reasoning
+- implementer self-review
+- unsupported claims that the implementation is correct
+- architecture justification unrelated to verification
+
+The reviewer may independently repeat any relevant checks.
+
 ## Review
 
 Implementation review should be independent from implementation where practical.
@@ -304,51 +339,56 @@ Otherwise they should be documented for human review or future work.
 
 ---
 
-## Automated correction loop
+## Correction rounds
 
-An automated implementation/review workflow may perform at most two correction rounds.
+A correction round is consumed only when implementation files are changed in
+response to review findings.
 
-Example:
+The following do not consume a correction round:
 
-```text
-IMPLEMENT
-    |
-    v
-VERIFY
-    |
-    v
-REVIEW #1
-    |
-    +-- PASS ----------------------+
-    |                              |
-    v                              |
-FIX                                |
-    |                              |
-    v                              |
-VERIFY                             |
-    |                              |
-    v                              |
-REVIEW #2                         |
-    |                              |
-    +-- PASS ----------------------+
-    |
-    v
-FIX
-    |
-    v
-VERIFY
-    |
-    v
-FINAL REVIEW STATE
-```
+- providing missing deterministic verification evidence
+- clarifying already documented verification results
+- reviewer reassessment without implementation changes
+- resolving a human gate
+- correcting reviewer misunderstanding without changing implementation
 
-If unresolved Critical or Major findings remain after the allowed correction rounds, automated progress must stop.
+After an implementation change triggered by review:
 
-The task should be marked as requiring human review.
+1. run relevant deterministic verification again;
+2. produce an updated Verification Record;
+3. perform a fresh independent review.
 
-The automation must not continue indefinitely attempting to satisfy reviewers.
+At most two implementation correction rounds are allowed.
 
----
+If unresolved Critical or Major findings remain after the second implementation
+correction round, automated progress must stop and the workflow must require
+human review.
+
+## Human gates
+
+Some issue requirements cannot be resolved safely by an implementation or review
+agent.
+
+Examples include:
+
+- confirming whether a historical credential was real or dummy
+- approving a security or architecture trade-off
+- authorizing infrastructure or account-level changes
+- accepting an intentional compatibility break
+- resolving requirements that depend on organizational policy
+
+Such requirements must be marked as `HUMAN_GATE`.
+
+An AI system must not infer or fabricate the decision.
+
+If a required human gate is unresolved, the workflow state becomes:
+
+`HUMAN_DECISION_REQUIRED`
+
+The workflow may continue only after the maintainer records the decision.
+
+The decision must be included in the pull request when it affects the issue
+Definition of Done.
 
 ## Pull request readiness gates
 
@@ -361,6 +401,7 @@ A pull request is ready for creation only when:
 * no unresolved Critical findings remain
 * no unresolved Major findings remain
 * remaining Minor findings are documented
+* all required Human Gates / Maintainer Decisions are resolved
 * relevant documentation is consistent with the implementation
 * known risks and limitations are documented
 
@@ -409,14 +450,19 @@ chore: remove tracked runtime logs
 
 Do not include unrelated changes in a commit.
 
-For the planned automated workflow, implementation agents should not independently:
+During implementation, implementation agents must not independently:
 
+* stage or unstage files
+* create commits
 * push branches
 * merge branches
 * create pull requests
 * approve pull requests
 
-These lifecycle actions should be controlled by the orchestrating workflow.
+These Git lifecycle actions belong to the human maintainer or the deterministic
+orchestrator.
+
+Reviewers must not modify the working tree or Git index.
 
 ---
 
@@ -492,28 +538,96 @@ The purpose is to validate the process, prompts, review quality, failure modes, 
 
 ---
 
+## Refined workflow states
+
+The manual workflow and future deterministic orchestrator should distinguish
+implementation, review, human decisions, and Git lifecycle phases explicitly.
+
+```text
+FETCH_ISSUE
+    ↓
+VALIDATE_ISSUE
+    ↓
+CREATE_WORKTREE
+    ↓
+PLAN
+    ↓
+IMPLEMENT
+    ↓
+VERIFY_WORKTREE
+    ↓
+REVIEW
+    │
+    ├── Critical/Major findings
+    │       ↓
+    │      FIX
+    │       ↓
+    │   VERIFY_WORKTREE
+    │       ↓
+    │   FRESH REVIEW
+    │
+    ├── unresolved human gate
+    │       ↓
+    │   HUMAN_DECISION_REQUIRED
+    │
+    └── no blocking findings
+            ↓
+      RESOLVE_HUMAN_GATES
+            ↓
+          STAGE
+            ↓
+      VERIFY_STAGED
+            ↓
+          COMMIT
+            ↓
+           PUSH
+            ↓
+        CREATE_PR
+            ↓
+       HUMAN_REVIEW
+            ↓
+        HUMAN_MERGE
+```
+
+`VERIFY_WORKTREE` evaluates the implementation before Git staging.
+
+Typical checks include:
+
+- tests
+- builds
+- lint
+- formatting
+- type checks
+- `docker compose config`
+- runtime smoke tests
+- `git diff --check`
+
+`VERIFY_STAGED` evaluates the exact content intended for commit.
+
+Typical checks include:
+
+- `git diff --cached --check`
+- `git status --short`
+- `git diff --cached --stat`
+- assertions whose meaning depends on Git index state
+- confirmation that no unrelated files are staged
+
+Git state must be determined by deterministic Git commands, not by reviewer or
+implementer interpretation.
+
 ## Future orchestration
 
 A future local orchestrator may automate the issue-to-pull-request workflow.
 
 The orchestrator should be a deterministic state machine rather than an AI agent responsible for workflow control.
 
-Expected states may include:
+The canonical state model is defined in **Refined workflow states** above.
+The orchestrator implementation should use that model rather than maintaining a
+second independent state definition.
+
+Terminal or exceptional states may additionally include:
 
 ```text
-FETCH_ISSUE
-VALIDATE_ISSUE
-CREATE_WORKTREE
-PLAN
-IMPLEMENT
-VERIFY
-REVIEW
-FIX
-VERIFY
-REVIEW
-CREATE_COMMIT
-PUSH_BRANCH
-CREATE_PULL_REQUEST
 DONE
 HUMAN_REVIEW_REQUIRED
 FAILED

@@ -70,7 +70,17 @@ Do not duplicate the full issue unless useful for review.
 * [ ] Documentation and configuration examples are updated where affected
 * [ ] No unrelated changes are included
 * [ ] No unresolved Critical or Major review findings remain
+* [ ] All required Human Gates / Maintainer Decisions are resolved
 * [ ] Remaining limitations or intentionally deferred work are documented
+
+## Human Gates / Maintainer Decisions
+
+<!--
+Record human-only decisions required by the linked issue.
+Use "None" if the issue has no human gates.
+-->
+
+None
 
 ## Review findings
 

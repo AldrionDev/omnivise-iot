@@ -105,6 +105,21 @@ body:
       required: true
 
   - type: textarea
+    id: human-gates
+    attributes:
+      label: Human Gates / Maintainer Decisions
+      description: Decisions that must be made by a human maintainer and must not be inferred by an AI agent.
+      placeholder: |
+        Use "None" when no human-only decision is required.
+
+        Examples:
+        - Confirm whether a previously exposed credential was real or dummy.
+        - Approve an account-level infrastructure change.
+        - Accept an intentional compatibility break.
+    validations:
+      required: false
+
+  - type: textarea
     id: notes
     attributes:
       label: Technical Notes / Constraints

@@ -80,6 +80,32 @@ Do not include unrelated cleanup, refactoring, or speculative improvements.
 Do not commit, push, merge, or create a pull request unless the current task
 explicitly requests that action.
 
+
+### Git lifecycle ownership
+
+During implementation tasks, agents may modify, create, and delete files and may
+run verification commands.
+
+Implementation agents must not perform Git lifecycle actions unless the current
+task explicitly assigns them orchestration responsibility.
+
+Implementation agents must not:
+
+- stage or unstage files
+- commit
+- push branches
+- create pull requests
+- merge
+- approve their own changes
+
+Git lifecycle actions belong to the human maintainer or the deterministic
+orchestrator.
+
+Reviewers must not modify the working tree or Git index.
+
+Git state must be determined using deterministic Git commands rather than
+reviewer or implementer interpretation.
+
 ## Verification
 
 Run checks relevant to every affected component.
@@ -127,6 +153,30 @@ Do not claim an issue is complete while a relevant available check is failing.
 If required verification cannot be performed, state exactly which check was not
 run and why.
 
+
+### Verification Record
+
+After implementation, produce an objective Verification Record for the
+independent reviewer.
+
+The Verification Record must contain:
+
+- exact commands executed
+- command results or exit status
+- relevant test counts where available
+- checks that could not be run
+- documented reasons for checks considered not applicable
+- relevant deterministic observations such as Git state
+
+The Verification Record is evidence and must not contain or substitute:
+
+- implementer reasoning
+- implementer self-review
+- unsupported claims that the implementation is correct
+- architecture justification unrelated to verification
+
+The reviewer may independently repeat any relevant verification.
+
 ## Review expectations
 
 Review findings use these severities:
@@ -152,6 +202,7 @@ Non-blocking quality improvement with limited impact.
 Minor findings do not automatically block completion unless the issue's
 Definition of Done requires them to be resolved.
 
+
 ## Completion report
 
 At the end of an implementation task report:
@@ -163,3 +214,5 @@ At the end of an implementation task report:
 5. Definition of Done status
 6. remaining risks or known limitations
 7. intentionally deferred follow-up work
+8. objective Verification Record using the fields defined in `### Verification Record`
+9. unresolved Human Gates / Maintainer Decisions
