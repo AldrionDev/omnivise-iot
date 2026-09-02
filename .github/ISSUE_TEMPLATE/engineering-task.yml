@@ -1,0 +1,119 @@
+name: Engineering task
+description: Scoped engineering task with explicit acceptance, verification, and completion criteria
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for implementation work.
+
+        Keep the issue narrowly scoped and reviewable. The issue acts as the task contract for both human and AI-assisted development.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / Context
+      description: Describe the current problem, limitation, or reason this work is needed.
+      placeholder: |
+        Explain the current behavior or technical problem.
+
+        Include relevant context such as affected components, existing limitations,
+        or why the change is needed now.
+    validations:
+      required: true
+
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: Describe the desired outcome of this issue.
+      placeholder: |
+        Describe the end result, not the implementation details.
+
+        Example:
+        The frontend WebSocket connection works correctly regardless of deployment host
+        and automatically uses a secure WebSocket connection when served over HTTPS.
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: List the work that belongs to this issue.
+      placeholder: |
+        - Update ...
+        - Add ...
+        - Preserve ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: out-of-scope
+    attributes:
+      label: Out of Scope
+      description: Explicitly list related work that must not be implemented as part of this issue.
+      placeholder: |
+        - Kubernetes manifests
+        - AWS infrastructure
+        - Unrelated refactoring
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: Define observable requirements that the implementation must satisfy.
+      placeholder: |
+        - [ ] Required behavior works as described.
+        - [ ] Existing supported behavior remains unchanged.
+        - [ ] Relevant failure cases are handled correctly.
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification
+      description: Define the tests, commands, or manual checks that prove the acceptance criteria.
+      placeholder: |
+        - `mvn test`
+        - `npm run lint`
+        - `npm run build`
+        - `docker compose config`
+        - Manual check: ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: definition-of-done
+    attributes:
+      label: Definition of Done
+      description: Define all conditions that must be satisfied before this issue may be considered complete.
+      placeholder: |
+        - [ ] Implementation is complete and stays within the defined scope.
+        - [ ] All acceptance criteria are satisfied.
+        - [ ] Required verification has been completed successfully.
+        - [ ] Relevant automated tests exist or a documented reason explains why they are not applicable.
+        - [ ] No relevant quality gate is failing.
+        - [ ] Documentation and configuration examples are updated if affected.
+        - [ ] No unrelated changes are included.
+        - [ ] No unresolved Critical or Major review findings remain.
+        - [ ] Remaining limitations or intentionally deferred work are documented.
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Technical Notes / Constraints
+      description: Optional architectural constraints, dependencies, risks, implementation notes, or useful references.
+      placeholder: |
+        Examples:
+        - Preserve Docker Compose compatibility.
+        - Do not introduce new dependencies unless necessary.
+        - Depends on issue #...
+        - Relevant files: ...
+    validations:
+      required: false
