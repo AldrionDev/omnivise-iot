@@ -3,6 +3,9 @@
 *.pem
 *.key
 
+# --- Runtime logs ---
+*.log
+
 # --- Java / Maven ---
 target/
 *.class

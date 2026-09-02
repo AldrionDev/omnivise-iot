@@ -42,8 +42,7 @@ public class Main {
 
         System.out.println("🚀 Starting OmniVise-IoT Backend...");
         System.out.println("📂 .env file loaded: " + getDotenvPath());
-        System.out.println("🔌 MongoDB URI: "
-                + (mongoUser != null ? "mongodb://" + mongoUser + ":***@" + mongoHost + ":" + mongoPort : mongoUri));
+        System.out.println("🔌 MongoDB connection configured for database: " + mongoDatabase);
         System.out.println("🌐 Port: " + port);
 
         // Initialize MongoDB service
