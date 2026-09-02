@@ -34,7 +34,7 @@ public class SensorDataSimulator {
 
     public static void main(String[] args) {
         System.out.println("🚀 Starting Sensor Data Simulator...");
-        System.out.println("📡 MongoDB URI: " + maskPassword(MONGO_URI));
+        System.out.println("📡 MongoDB connection configured");
         System.out.println("💾 Database: " + DATABASE_NAME);
         System.out.println("📋 Collection: " + COLLECTION_NAME);
         System.out.println("⏱️  Interval: " + INTERVAL_SECONDS + " seconds");
@@ -156,17 +156,4 @@ public class SensorDataSimulator {
         return Math.round(value * multiplier) / multiplier;
     }
 
-    /**
-     * Hides the password in MongoDB URI for logs.
-     */
-    private static String maskPassword(String uri) {
-        if (uri.contains("@")) {
-            int atIndex = uri.indexOf("@");
-            int startIndex = uri.lastIndexOf(":", atIndex);
-            if (startIndex != -1) {
-                return uri.substring(0, startIndex + 1) + "****" + uri.substring(atIndex);
-            }
-        }
-        return uri;
-    }
 }
