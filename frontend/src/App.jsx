@@ -9,6 +9,7 @@ import { useEffect, useState } from "react";
 import FilterPanel from "./components/FilterPanel";
 import SensorCard from "./components/SensorCard";
 import SensorTable from "./components/SensorTable";
+import { getWebSocketUrl } from "./webSocketUrl";
 
 function App() {
   // WebSocket connection state
@@ -49,7 +50,8 @@ function App() {
 
   useEffect(() => {
     // WebSocket URL (backend)
-    const wsUrl = import.meta.env.VITE_WS_URL || "ws://localhost:8080/ws/sensors";
+    const wsUrl =
+      import.meta.env.VITE_WS_URL || getWebSocketUrl(window.location);
     const ws = new WebSocket(wsUrl);
 
     // When connection opens
