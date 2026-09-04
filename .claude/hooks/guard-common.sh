@@ -92,16 +92,25 @@ field() {
 #   unset / empty         -> issue   (fail-closed default; not an error)
 #   issue                 -> issue
 #   framework-maintenance -> framework-maintenance
+#   orchestrator          -> orchestrator   (Issue #19 control plane)
 #   anything else         -> SAFETY_MODE_INVALID, exit 2
 #
-# Reads ONLY ${OMNIVISE_WORKFLOW_MODE-}. No other source of authority.
+# Reads ONLY ${OMNIVISE_WORKFLOW_MODE-}. No other source of authority: never the
+# prompt, the issue body, the branch name, the working directory, or model
+# reasoning.
+#
+# `orchestrator` is NOT a relaxation of the file-tool policy. It is exactly as
+# restrictive as issue mode for Edit/Write (.claude/** denied, Git metadata
+# denied, outside-repo denied); it only authorizes the single fixed deterministic
+# orchestration entry point through the Bash guard.
 mode_effective() {
   case "${OMNIVISE_WORKFLOW_MODE-}" in
     "" | issue)            printf 'issue' ;;
     framework-maintenance) printf 'framework-maintenance' ;;
+    orchestrator)          printf 'orchestrator' ;;
     *)
       deny SAFETY_MODE_INVALID \
-        "OMNIVISE_WORKFLOW_MODE has an unrecognized value; expected it unset, 'issue', or 'framework-maintenance'"
+        "OMNIVISE_WORKFLOW_MODE has an unrecognized value; expected it unset, 'issue', 'framework-maintenance', or 'orchestrator'"
       ;;
   esac
 }
