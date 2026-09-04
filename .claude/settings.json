@@ -1,0 +1,40 @@
+{
+  "permissions": {
+    "deny": ["EnterWorktree", "ExitWorktree", "Monitor", "PowerShell"]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/framework-write-guard.sh\""
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/shell-guard.sh\""
+          }
+        ]
+      }
+    ],
+    "WorktreeCreate": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/worktree-create-guard.sh\""
+          }
+        ]
+      }
+    ]
+  }
+}
