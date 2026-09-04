@@ -14,15 +14,26 @@
 #       bash|sh <script> -> only the four trusted read-only .claude workflow
 #               entry points (issue-contract.sh, workflow-state.sh read-only
 #               subcommands, candidate.sh, tests/run.sh), each with a constrained
-#               per-script argument policy. verify.sh is intentionally NOT
-#               reachable from a Claude Bash call — it executes component
-#               verification commands against candidate-controlled files, so its
-#               execution belongs to the maintainer / deterministic control
-#               plane, never a Claude session.
+#               per-script argument policy, PLUS — in orchestrator mode only —
+#               orchestrator.sh restricted to a closed event grammar.
+#               verify.sh is intentionally NOT reachable from a Claude Bash call
+#               — it executes component verification commands against
+#               candidate-controlled files, so its execution belongs to the
+#               deterministic control plane (orchestrator.sh), never a Claude
+#               session. lifecycle.sh and launch-issue.sh are never reachable in
+#               any mode.
 #   * anything else -> denied.
 #
-# The grammar and every lifecycle denial are identical in both workflow modes;
-# mode_effective runs first only so a malformed OMNIVISE_WORKFLOW_MODE fails as
+# The grammar and every lifecycle denial are identical in all workflow modes with
+# exactly one exception (Issue #19): in OMNIVISE_WORKFLOW_MODE=orchestrator the
+# single fixed entry point `bash .claude/scripts/orchestrator.sh <event>` is
+# authorized, with a closed event list and no free-form argument. Authority comes
+# only from the inherited environment; nothing about the prompt, the issue, the
+# branch or the working directory can produce it. Direct `git add|commit|push`,
+# branch/worktree mutation and arbitrary `gh` stay denied in orchestrator mode
+# too — the orchestration events are the only route to a lifecycle action.
+#
+# mode_effective runs first so a malformed OMNIVISE_WORKFLOW_MODE fails as
 # SAFETY_MODE_INVALID uniformly.
 #
 # On deny: "<CODE>: <reason>" on stderr, empty stdout, exit 2. On allow: silent
@@ -400,6 +411,36 @@ script_args_candidate() {
   esac
 }
 
+# The closed orchestration event list. It must stay in exact sync with the
+# dispatch table in .claude/scripts/orchestrator.sh; anything outside this list
+# — and every argument except `--code <UPPER_SNAKE>` — fails closed.
+readonly ORCH_EVENTS='status validate-contract begin-plan begin-implement
+verify-worktree begin-review review-pass review-changes-required review-reassess
+reassess-complete gates-resolved stage verify-staged commit push create-pr
+block resume'
+
+script_args_orchestrator() {
+  local event="${1:-}" e ok=0
+  [ -n "$event" ] || deny SAFETY_SHELL_COMMAND_DENIED "orchestrator.sh: an event name is required"
+  for e in $ORCH_EVENTS; do [ "$e" = "$event" ] && ok=1; done
+  [ "$ok" -eq 1 ] || deny SAFETY_SHELL_COMMAND_DENIED "orchestrator.sh: unknown orchestration event"
+  shift || true
+
+  case "$#" in
+    0) return 0 ;;
+    2) : ;;
+    *) deny SAFETY_SHELL_COMMAND_DENIED "orchestrator.sh: only '--code <CODE>' may follow an event" ;;
+  esac
+  [ "$1" = "--code" ] ||
+    deny SAFETY_SHELL_COMMAND_DENIED "orchestrator.sh: option '$(safe_frag "$1")' is not permitted"
+  [ "$event" = "block" ] ||
+    deny SAFETY_SHELL_COMMAND_DENIED "orchestrator.sh: --code is only permitted for the 'block' event"
+  case "$2" in
+    "" | *[!A-Z0-9_]*) deny SAFETY_SHELL_COMMAND_DENIED "orchestrator.sh: --code must be a bare upper-case identifier" ;;
+  esac
+  [ "${#2}" -le 64 ] || deny SAFETY_SHELL_COMMAND_DENIED "orchestrator.sh: --code is too long"
+}
+
 # classify_script RUNNER ARGS... — RUNNER is bash|sh; ARGS start with the script.
 classify_script() {
   local runner="$1"; shift
@@ -414,6 +455,23 @@ classify_script() {
     .claude/scripts/workflow-state.sh) script_args_workflow_state "$@" ;;
     .claude/scripts/candidate.sh)      script_args_candidate "$@" ;;
     .claude/tests/run.sh)              script_args_run "$@" ;;
+    .claude/scripts/orchestrator.sh)
+      # The ONLY mode-conditional rule in this guard. Everything else — the git
+      # grammar, the gh denial, the lifecycle denials below — is identical in
+      # every mode.
+      [ "$_GUARD_MODE" = "orchestrator" ] ||
+        deny SAFETY_ORCHESTRATOR_AUTHORITY_DENIED \
+          "the deterministic orchestration controller is only callable in orchestrator mode, which is granted by the launcher environment"
+      script_args_orchestrator "$@"
+      ;;
+    .claude/scripts/lifecycle.sh)
+      deny SAFETY_LIFECYCLE_DIRECT_DENIED \
+        "the Git/GitHub lifecycle helper is never callable from a Claude session; it runs only through the deterministic orchestration controller"
+      ;;
+    .claude/scripts/launch-issue.sh)
+      deny SAFETY_LIFECYCLE_DIRECT_DENIED \
+        "the launcher/bootstrap entry point is maintainer-owned and is never callable from a Claude session"
+      ;;
     *)
       deny SAFETY_SHELL_COMMAND_DENIED "'$runner $script' is not one of the trusted .claude workflow entry points"
       ;;
@@ -446,8 +504,10 @@ guard_preflight
 read_payload
 
 # A malformed OMNIVISE_WORKFLOW_MODE fails as SAFETY_MODE_INVALID before any
-# classification, uniformly for every command.
-mode_effective >/dev/null
+# classification, uniformly for every command. The resolved mode is captured once
+# here: it is the ONLY authority source in this guard.
+_GUARD_MODE="$(mode_effective)" || exit 2
+[ -n "$_GUARD_MODE" ] || deny SAFETY_MODE_INVALID "the workflow mode could not be resolved"
 
 cmd="$(field '.tool_input.command // ""')"
 [ -n "$cmd" ] || deny SAFETY_INPUT_INVALID "the Bash payload carries no command string"

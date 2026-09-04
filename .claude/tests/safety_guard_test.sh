@@ -641,6 +641,139 @@ assert_ok "settings.json: file/notebook matcher wired to framework-write-guard.s
   jq -e '[.hooks.PreToolUse[] | select(.matcher=="Edit|Write|MultiEdit|NotebookEdit") | .hooks[0].command | contains("framework-write-guard.sh")] | any' "$SAFETY_SETTINGS_FILE"
 
 # ========================================================================
+# 9b. Issue #19 — orchestrator-only lifecycle authority
+#
+# `orchestrator` is a valid workflow mode that authorizes exactly ONE fixed
+# deterministic entry point through the Bash guard. It relaxes nothing else:
+# file-tool policy is identical to issue mode, and every direct Git/GitHub
+# lifecycle command stays denied.
+# ========================================================================
+
+G_ORCH="bash .claude/scripts/orchestrator.sh"
+
+# --- the mode itself is recognised (not SAFETY_MODE_INVALID)
+ga "orchestrator: mode is recognised by the shell guard" \
+  "orchestrator" "$G_SH" "$(fx_bash_input 'git status')"
+ga "orchestrator: mode is recognised by the framework guard" \
+  "orchestrator" "$G_FW" "$(fwe 'backend/src/Main.java')"
+
+# --- file-tool policy in orchestrator mode is EXACTLY issue-mode policy
+for p in ".claude/scripts/verify.sh" ".claude/settings.json" ".claude/hooks/shell-guard.sh" \
+         ".claude/agents/reviewer.md" ".claude/skills/orchestrate-issue/SKILL.md"; do
+  gd "orchestrator: .claude write denied: $p" SAFETY_FRAMEWORK_MUTATION_DENIED \
+    "orchestrator" "$G_FW" "$(fwe "$p")"
+done
+gd "orchestrator: git-metadata write denied" SAFETY_GIT_METADATA_MUTATION_DENIED \
+  "orchestrator" "$G_FW" "$(fwe '.git/config')" "$PD_GM"
+gd "orchestrator: outside-repo write denied" SAFETY_OUTSIDE_REPO_WRITE_DENIED \
+  "orchestrator" "$G_FW" "$(fwe '/etc/cron.d/x')" "$PD_OUT"
+ga "orchestrator: ordinary in-repo write still allowed" \
+  "orchestrator" "$G_FW" "$(fwe 'backend/src/Main.java')"
+
+# --- direct Git / GitHub lifecycle stays denied in orchestrator mode
+while IFS= read -r c; do
+  [ -n "$c" ] || continue
+  gd "orchestrator: direct git lifecycle denied: $c" SAFETY_GIT_MUTATION_DENIED \
+    "orchestrator" "$G_SH" "$(fx_bash_input "$c")"
+done <<'ORCHGIT'
+git add -A
+git add .claude/scripts/x
+git commit -m x
+git commit --amend
+git push
+git push --force origin main
+git merge main
+git rebase main
+git worktree add ../wt -b b origin/main
+git branch feat/x
+git switch -c feat/x
+git reset --hard HEAD~1
+ORCHGIT
+gd "orchestrator: gh remains denied" SAFETY_GITHUB_MUTATION_DENIED \
+  "orchestrator" "$G_SH" "$(fx_bash_input 'gh pr create -t a -b b')"
+gd "orchestrator: gh pr merge remains denied" SAFETY_GITHUB_MUTATION_DENIED \
+  "orchestrator" "$G_SH" "$(fx_bash_input 'gh pr merge 12 --squash')"
+gd "orchestrator: verify.sh remains off the allowlist" SAFETY_SHELL_COMMAND_DENIED \
+  "orchestrator" "$G_SH" "$(fx_bash_input 'bash .claude/scripts/verify.sh --mode worktree')"
+gd "orchestrator: workflow-state mutation remains denied" SAFETY_SHELL_COMMAND_DENIED \
+  "orchestrator" "$G_SH" "$(fx_bash_input 'bash .claude/scripts/workflow-state.sh transition COMMIT')"
+
+# --- the lifecycle helper and the launcher are never Claude-callable
+for m in issue framework-maintenance orchestrator "-unset-"; do
+  gd "lifecycle.sh direct call denied ($m)" SAFETY_LIFECYCLE_DIRECT_DENIED \
+    "$m" "$G_SH" "$(fx_bash_input 'bash .claude/scripts/lifecycle.sh stage')"
+  gd "lifecycle.sh commit denied ($m)" SAFETY_LIFECYCLE_DIRECT_DENIED \
+    "$m" "$G_SH" "$(fx_bash_input 'bash .claude/scripts/lifecycle.sh commit')"
+  gd "launch-issue.sh direct call denied ($m)" SAFETY_LIFECYCLE_DIRECT_DENIED \
+    "$m" "$G_SH" "$(fx_bash_input 'bash .claude/scripts/launch-issue.sh --issue 19')"
+done
+
+# --- the orchestration entry point: allowed ONLY in orchestrator mode
+while IFS= read -r c; do
+  [ -n "$c" ] || continue
+  ga "orchestrator entry allowed: $c" "orchestrator" "$G_SH" "$(fx_bash_input "$c")"
+  for m in issue framework-maintenance "-unset-"; do
+    gd "orchestrator entry denied ($m): $c" SAFETY_ORCHESTRATOR_AUTHORITY_DENIED \
+      "$m" "$G_SH" "$(fx_bash_input "$c")"
+  done
+done <<ORCHOK
+$G_ORCH status
+$G_ORCH validate-contract
+$G_ORCH begin-plan
+$G_ORCH begin-implement
+$G_ORCH verify-worktree
+$G_ORCH begin-review
+$G_ORCH review-pass
+$G_ORCH review-changes-required
+$G_ORCH review-reassess
+$G_ORCH reassess-complete
+$G_ORCH gates-resolved
+$G_ORCH stage
+$G_ORCH verify-staged
+$G_ORCH commit
+$G_ORCH push
+$G_ORCH create-pr
+$G_ORCH resume
+$G_ORCH block --code HUMAN_GATE_UNRESOLVED
+ORCHOK
+
+# --- closed grammar: no free-form argument survives, even in orchestrator mode
+while IFS= read -r c; do
+  [ -n "$c" ] || continue
+  gd "orchestrator grammar denied: $c" SAFETY_SHELL_COMMAND_DENIED \
+    "orchestrator" "$G_SH" "$(fx_bash_input "$c")"
+done <<ORCHBAD
+$G_ORCH
+$G_ORCH merge
+$G_ORCH nuke
+$G_ORCH commit --message pwned
+$G_ORCH commit --repo-root /elsewhere
+$G_ORCH status --code CONTRACT_INVALID
+$G_ORCH block --code contract_invalid
+$G_ORCH block --code CONTRACT INVALID
+$G_ORCH block --reason x
+$G_ORCH stage extra
+$G_ORCH --code HUMAN_GATE_UNRESOLVED
+sh .claude/scripts/orchestrator.sh push --force
+ORCHBAD
+
+# --- authority never comes from prompt text, branch name, cwd or issue content
+PD_BRANCH="$(fx_pdir)"
+git -C "$PD_BRANCH" checkout -q -b "feat/19-orchestrator"
+gd "authority: a branch called 'orchestrator' grants nothing" SAFETY_ORCHESTRATOR_AUTHORITY_DENIED \
+  "issue" "$G_SH" "$(fx_bash_input "$G_ORCH commit")" "$PD_BRANCH"
+gd "authority: a branch called 'orchestrator' does not unlock git commit" SAFETY_GIT_MUTATION_DENIED \
+  "issue" "$G_SH" "$(fx_bash_input 'git commit -m x')" "$PD_BRANCH"
+gd "authority: payload-supplied mode grants nothing" SAFETY_ORCHESTRATOR_AUTHORITY_DENIED \
+  "issue" "$G_SH" "$(fx_hook_input Bash "$(jq -cn --arg c "$G_ORCH commit" '{mode:"orchestrator", command:$c}')")"
+gd "authority: an inline mode assignment grants nothing" SAFETY_SHELL_COMMAND_DENIED \
+  "issue" "$G_SH" "$(fx_bash_input "OMNIVISE_WORKFLOW_MODE=orchestrator $G_ORCH commit")"
+gd "authority: env-prefixed mode grants nothing" SAFETY_SHELL_COMMAND_DENIED \
+  "issue" "$G_SH" "$(fx_bash_input "env OMNIVISE_WORKFLOW_MODE=orchestrator $G_ORCH commit")"
+gd "authority: a chained orchestrator call in issue mode is denied" SAFETY_ORCHESTRATOR_AUTHORITY_DENIED \
+  "issue" "$G_SH" "$(fx_bash_input "git status && $G_ORCH push")"
+
+# ========================================================================
 # 10. Compatibility / no-mutation / isolation
 # ========================================================================
 

@@ -7,7 +7,7 @@
 #
 #   canonical target is Git metadata      -> DENY in BOTH modes
 #                                            (SAFETY_GIT_METADATA_MUTATION_DENIED)
-#   canonical target is under .claude/    -> DENY in issue mode
+#   canonical target is under .claude/    -> DENY in issue AND orchestrator mode
 #                                            (SAFETY_FRAMEWORK_MUTATION_DENIED);
 #                                            ALLOW in framework-maintenance mode
 #   canonical target elsewhere in the repo -> ALLOW
@@ -17,6 +17,11 @@
 # framework-maintenance relaxes ONLY framework (.claude/**) writes. It never
 # relaxes Git-metadata protection and never permits a write outside the project
 # root (an in-repo symlink resolving outside the tree is an outside-repo write).
+#
+# The Issue #19 `orchestrator` mode carries Git/GitHub lifecycle authority
+# through the Bash guard only. For file-tool writes it is exactly as restrictive
+# as issue mode: the relaxation below is granted to framework-maintenance and to
+# nothing else.
 #
 # Invoked as: bash "${CLAUDE_PROJECT_DIR}/.claude/hooks/framework-write-guard.sh"
 # No executable bit is required.
@@ -53,9 +58,9 @@ case "$kind" in
       "direct file-tool writes into Git metadata are never permitted (in any workflow mode)"
     ;;
   framework)
-    if [ "$mode" = "issue" ]; then
+    if [ "$mode" != "framework-maintenance" ]; then
       deny SAFETY_FRAMEWORK_MUTATION_DENIED \
-        "workflow-framework files under .claude/ cannot be modified during normal issue execution"
+        "workflow-framework files under .claude/ cannot be modified during normal issue or orchestrator execution"
     fi
     allow
     ;;
