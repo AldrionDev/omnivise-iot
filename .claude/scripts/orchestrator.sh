@@ -21,6 +21,9 @@
 #   orchestrator.sh review-reassess            REVIEW           -> REASSESS_REVIEW
 #   orchestrator.sh reassess-complete          REASSESS_REVIEW  -> REVIEW
 #   orchestrator.sh gates-resolved             RESOLVE_HUMAN_GATES -> STAGE
+#                                              (the ONLY Human Gate settlement
+#                                               check; validate-contract checks
+#                                               gate structure only)
 #   orchestrator.sh stage                      STAGE            (lifecycle: stage)
 #   orchestrator.sh verify-staged              STAGE            -> VERIFY_STAGED
 #   orchestrator.sh commit                     VERIFY_STAGED    -> COMMIT   (lifecycle)
@@ -115,11 +118,30 @@ require_valid_contract() {
     orch_enter_offramp "$REPO" CONTRACT_HASH_MISMATCH
 }
 
+# Human Gate SETTLEMENT — required only at RESOLVE_HUMAN_GATES, the phase
+# immediately before STAGE. A gate that is still open there is a maintainer
+# decision, never a model one, so it off-ramps to HUMAN_DECISION_REQUIRED.
 require_gates_settled() {
   local st; st="$(contract_gate_status)"
   case "$st" in
     none | resolved) : ;;
     *) orch_enter_offramp "$REPO" HUMAN_GATE_UNRESOLVED ;;
+  esac
+}
+
+# Human Gate STRUCTURE — all that initial contract validation may demand
+# (Issue #24). `none`, `resolved` and a well-formed `unresolved` are equally
+# valid this early: a gate that is deliberately scheduled for the pre-staging
+# decision point must not block PLAN / IMPLEMENT / VERIFY_WORKTREE / REVIEW.
+# Anything the parser cannot classify still fails closed, as a contract defect.
+# The status is published in $GATE_STATUS rather than returned, because
+# orch_enter_offramp exits and a command substitution would swallow that exit.
+GATE_STATUS=""
+require_gates_well_formed() {
+  GATE_STATUS="$(contract_gate_status)"
+  case "$GATE_STATUS" in
+    none | resolved | unresolved) : ;;
+    *) orch_enter_offramp "$REPO" CONTRACT_INVALID ;;
   esac
 }
 
@@ -147,9 +169,9 @@ ev_status() {
 ev_validate_contract() {
   orch_require_phase "$REPO" FETCH_ISSUE >/dev/null
   require_valid_contract
-  require_gates_settled
+  require_gates_well_formed
   transition VALIDATE_ISSUE
-  emit validate-contract OK
+  emit validate-contract OK "$(jq -cn --arg s "$GATE_STATUS" '{human_gates:$s}')"
 }
 
 ev_begin_plan() {

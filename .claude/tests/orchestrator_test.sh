@@ -18,6 +18,27 @@ boot() {
   BOOT_CONTRACT="${spec##*|}"
 }
 
+# regate REPO VARIANT — replace the stored issue contract with another
+# fx_contract variant and realign the recorded contract hash, so the Human Gate
+# state (and not a hash drift) is what the orchestrator reacts to. Seen from the
+# deterministic layer this is exactly what a maintainer editing the issue's
+# Human Gates section does.
+regate() {
+  local repo="$1" variant="$2" f sd newstate
+  f="$(fx_contract "$variant")"
+  sd="$(fxo_state_dir "$repo")"
+  cp "$f" "$sd/issue-contract.md"
+  newstate="$(jq -c --arg h "$(bash "$CONTRACT_SH" hash "$f")" \
+    '.contract_hash = $h' "$sd/state.json")"
+  printf '%s\n' "$newstate" >"$sd/state.json"
+}
+
+# gate_status REPO — the Human Gate status of REPO's stored contract, read
+# straight from the deterministic parser.
+gate_status() {
+  bash "$CONTRACT_SH" human-gates "$(fxo_state_dir "$1")/issue-contract.md" | jq -r '.status'
+}
+
 # ========================================================================
 # 1. Happy path, phase by phase
 # ========================================================================
@@ -28,7 +49,10 @@ fxo_set_verify PASS
 
 assert_eq "happy: bootstrap phase" "FETCH_ISSUE" "$(fxo_phase "$H")"
 
-assert_ok   "happy: validate-contract" fxo_orch "$H" validate-contract
+run_capture fxo_orch "$H" validate-contract
+assert_eq   "happy: validate-contract" "0" "$RC"
+assert_eq   "happy: the contract declares no Human Gate" "none" \
+  "$(printf '%s' "$OUT" | jq -r '.human_gates')"
 assert_eq   "happy: -> VALIDATE_ISSUE" "VALIDATE_ISSUE" "$(fxo_phase "$H")"
 
 run_capture fxo_orch "$H" begin-plan
@@ -270,20 +294,8 @@ assert_eq "offramp: contract hash drift -> CONTRACT_CLARIFICATION_REQUIRED" \
 assert_eq "offramp: the blocker is CONTRACT_HASH_MISMATCH" \
   "CONTRACT_HASH_MISMATCH" "$(fxo_state "$Y" get blocker_code)"
 
-# --- an unresolved human gate fails closed
-boot 30 "Human gate probe"
-G="$BOOT_WT"
-G_GATED="$(fx_contract gates-unresolved)"
-G_SD="$(fxo_state_dir "$G")"
-cp "$G_GATED" "$G_SD/issue-contract.md"
-# realign the recorded hash so the gate, not the hash, is what blocks
-G_NEWSTATE="$(jq -c --arg h "$(bash "$CONTRACT_SH" hash "$G_GATED")" '.contract_hash = $h' "$G_SD/state.json")"
-printf '%s\n' "$G_NEWSTATE" >"$G_SD/state.json"
-run_capture fxo_orch "$G" validate-contract
-assert_eq "offramp: unresolved human gate -> HUMAN_DECISION_REQUIRED" \
-  "HUMAN_DECISION_REQUIRED" "$(fxo_phase "$G")"
-assert_eq "offramp: the blocker is HUMAN_GATE_UNRESOLVED" \
-  "HUMAN_GATE_UNRESOLVED" "$(fxo_state "$G" get blocker_code)"
+# (the unresolved-Human-Gate off-ramp is a pre-staging concern; it is covered in
+# section 6, together with the rest of the Human Gate sequencing)
 
 # --- environment failure
 boot 31 "Environment probe"
@@ -327,7 +339,111 @@ assert_fail_code "offramp: block without a code is rejected" ORCHESTRATOR_USAGE 
 assert_eq "offramp: a rejected block left the phase alone" "FETCH_ISSUE" "$(fxo_phase "$B")"
 
 # ========================================================================
-# 6. Phase gating and grammar
+# 6. Human Gate sequencing (Issue #24 — regression for the #20 smoke test)
+# ========================================================================
+#
+# A Human Gate is settled by the maintainer immediately before staging, so
+# initial contract validation may only check that the Human Gates section is
+# STRUCTURALLY valid. The #20 smoke run failed because `validate-contract`
+# demanded settlement and sent a legitimate, deliberately-open pre-staging gate
+# to HUMAN_DECISION_REQUIRED straight out of FETCH_ISSUE.
+
+# --- the exact #20 scenario: one valid unresolved checkbox gate
+boot 30 "Human gate sequencing probe"
+G="$BOOT_WT"
+fxo_set_verify PASS
+regate "$G" gates-unresolved
+
+run_capture fxo_orch "$G" validate-contract
+assert_eq "gate seq: an unresolved gate does not block contract validation" "0" "$RC"
+assert_eq "gate seq: the accepted gate state is reported" "unresolved" \
+  "$(printf '%s' "$OUT" | jq -r '.human_gates')"
+assert_eq "gate seq: validation still advances to VALIDATE_ISSUE" \
+  "VALIDATE_ISSUE" "$(fxo_phase "$G")"
+assert_eq "gate seq: no blocker is recorded at contract validation" \
+  "" "$(fxo_state "$G" get blocker_code)"
+
+# the four working phases run with the gate still open
+assert_ok "gate seq: PLAN runs with an unresolved gate"       fxo_orch "$G" begin-plan
+assert_ok "gate seq: IMPLEMENT runs with an unresolved gate"  fxo_orch "$G" begin-implement
+fxo_candidate "$G"
+assert_ok "gate seq: VERIFY_WORKTREE runs with an unresolved gate" fxo_orch "$G" verify-worktree
+assert_ok "gate seq: REVIEW runs with an unresolved gate"     fxo_orch "$G" begin-review
+assert_eq "gate seq: the gate stayed unresolved throughout" "unresolved" "$(gate_status "$G")"
+
+# STAGE is unreachable at every point while the gate is open
+assert_fail_code "gate seq: STAGE is unreachable from REVIEW" ORCHESTRATOR_PHASE_MISMATCH \
+  fxo_orch "$G" stage
+assert_ok "gate seq: review-pass" fxo_orch "$G" review-pass
+assert_eq "gate seq: -> RESOLVE_HUMAN_GATES" "RESOLVE_HUMAN_GATES" "$(fxo_phase "$G")"
+assert_fail_code "gate seq: STAGE is unreachable from RESOLVE_HUMAN_GATES" \
+  ORCHESTRATOR_PHASE_MISMATCH fxo_orch "$G" stage
+
+# the gate is enforced here, and only here
+run_capture fxo_orch "$G" gates-resolved
+assert_ne "gate seq: an unresolved gate refuses gates-resolved" "0" "$RC"
+assert_eq "gate seq: unresolved gate -> HUMAN_DECISION_REQUIRED" \
+  "HUMAN_DECISION_REQUIRED" "$(fxo_phase "$G")"
+assert_eq "gate seq: the blocker is HUMAN_GATE_UNRESOLVED" \
+  "HUMAN_GATE_UNRESOLVED" "$(fxo_state "$G" get blocker_code)"
+assert_eq "gate seq: the blocker message is deterministic" \
+  "the issue contract carries an unresolved Human Gate" \
+  "$(fxo_state "$G" get blocker_message)"
+assert_eq "gate seq: the resume phase is the pre-staging gate phase" \
+  "RESOLVE_HUMAN_GATES" "$(fxo_state "$G" get resume_phase)"
+assert_fail_code "gate seq: STAGE is unreachable from the off-ramp" \
+  ORCHESTRATOR_PHASE_MISMATCH fxo_orch "$G" stage
+assert_eq "gate seq: the refused staging changed nothing" \
+  "HUMAN_DECISION_REQUIRED" "$(fxo_phase "$G")"
+assert_eq "gate seq: nothing was staged while the gate was open" \
+  "" "$(git -C "$G" diff --cached --name-only)"
+
+# the maintainer settles the gate; the existing resume path continues to STAGE
+regate "$G" gates-resolved
+assert_eq "gate seq: the maintainer decision is visible to the parser" \
+  "resolved" "$(gate_status "$G")"
+assert_ok "gate seq: resume after the maintainer decision" fxo_orch "$G" resume
+assert_eq "gate seq: resumed to RESOLVE_HUMAN_GATES" "RESOLVE_HUMAN_GATES" "$(fxo_phase "$G")"
+assert_eq "gate seq: resume cleared the blocker" "" "$(fxo_state "$G" get blocker_code)"
+assert_ok "gate seq: gates-resolved after the maintainer decision" fxo_orch "$G" gates-resolved
+assert_eq "gate seq: STAGE becomes reachable" "STAGE" "$(fxo_phase "$G")"
+assert_ok "gate seq: stage" fxo_orch "$G" stage
+assert_eq "gate seq: staging is still manifest-derived" \
+  ".claude/scripts/orchestrated.sh" "$(git -C "$G" diff --cached --name-only)"
+
+# --- an already-resolved gate keeps the happy path
+boot 35 "Resolved gate probe"
+GR="$BOOT_WT"
+fxo_set_verify PASS
+regate "$GR" gates-resolved
+run_capture fxo_orch "$GR" validate-contract
+assert_eq "gate resolved: validate-contract succeeds" "0" "$RC"
+assert_eq "gate resolved: the gate state is reported" "resolved" \
+  "$(printf '%s' "$OUT" | jq -r '.human_gates')"
+fxo_orch "$GR" begin-plan >/dev/null
+fxo_orch "$GR" begin-implement >/dev/null
+fxo_candidate "$GR"
+fxo_orch "$GR" verify-worktree >/dev/null
+fxo_orch "$GR" begin-review >/dev/null
+fxo_orch "$GR" review-pass >/dev/null
+assert_ok "gate resolved: gates-resolved continues to STAGE" fxo_orch "$GR" gates-resolved
+assert_eq "gate resolved: -> STAGE" "STAGE" "$(fxo_phase "$GR")"
+
+# --- malformed gate structure still fails closed at contract validation
+for gm_variant in gates-malformed gates-none-unchecked; do
+  boot 36 "Malformed gate probe"
+  GM="$BOOT_WT"
+  regate "$GM" "$gm_variant"
+  run_capture fxo_orch "$GM" validate-contract
+  assert_ne "gate structure: '$gm_variant' fails closed" "0" "$RC"
+  assert_eq "gate structure: '$gm_variant' -> CONTRACT_CLARIFICATION_REQUIRED" \
+    "CONTRACT_CLARIFICATION_REQUIRED" "$(fxo_phase "$GM")"
+  assert_eq "gate structure: '$gm_variant' records CONTRACT_INVALID" \
+    "CONTRACT_INVALID" "$(fxo_state "$GM" get blocker_code)"
+done
+
+# ========================================================================
+# 7. Phase gating and grammar
 # ========================================================================
 
 boot 34 "Gating probe"
@@ -359,7 +475,7 @@ assert_fail_code "state: orchestration requires initialised workflow state" ORCH
   fxo_orch "$NOSTATE" status
 
 # ========================================================================
-# 7. Isolation
+# 8. Isolation
 # ========================================================================
 
 assert_eq "orchestrator isolation: real repo index unchanged" \
