@@ -70,10 +70,13 @@ in — never guess.
 
 **validate-contract.** The authoritative issue contract was stored as workflow
 evidence by the launcher. This event revalidates it, checks it still matches the
-recorded contract hash, and checks the Human Gates section. An invalid or
-ambiguous contract fails into `CONTRACT_CLARIFICATION_REQUIRED`; an unresolved
-gate fails into `HUMAN_DECISION_REQUIRED`. Do not read around the failure and
-proceed.
+recorded contract hash, and checks the Human Gates section **structurally only**.
+`none`, `resolved` and a well-formed `unresolved` are all accepted here: an
+unresolved gate does **not** fail into `HUMAN_DECISION_REQUIRED` at this point,
+and may remain open through PLAN, IMPLEMENT, VERIFY_WORKTREE and REVIEW. Only a
+Human Gates section the parser cannot classify is a contract defect. An invalid
+or ambiguous contract fails into `CONTRACT_CLARIFICATION_REQUIRED`. Do not read
+around the failure and proceed.
 
 **begin-plan / planner.** Dispatch the `planner` agent with the issue number and
 the contract. The planner is read-only. Accept its plan yourself only when it
@@ -117,6 +120,14 @@ implementer reasoning travel into the review. Each dispatch increments
 
 The implementation-repair budget and the review-correction budget are separate.
 Never spend one to cover the other.
+
+**gates-resolved (Human Gate settlement).** `RESOLVE_HUMAN_GATES` is the single
+enforcement point for Human Gate settlement, immediately before staging. Here
+`none` and `resolved` continue to `STAGE`; `unresolved` off-ramps to
+`HUMAN_DECISION_REQUIRED` with `resume_phase` recorded as `RESOLVE_HUMAN_GATES`.
+After the maintainer resolves the gate in the issue, `resume` returns to
+`RESOLVE_HUMAN_GATES`, and `gates-resolved` may then advance to `STAGE`. STAGE is
+therefore unreachable while a Human Gate is unresolved.
 
 **gates-resolved → stage → verify-staged → commit → push → create-pr.** This
 ordering is enforced, not advisory: staging happens only in `STAGE` and only
