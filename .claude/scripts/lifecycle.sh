@@ -24,6 +24,10 @@
 # a branch, a remote, a refspec, or any other caller-supplied text: commit
 # messages, PR titles and PR bodies are generated from recorded workflow state.
 # `git push` is never given a force flag in any form.
+#
+# create-pr additionally renders the objective workflow evidence the run already
+# persisted (Issue #28) and fails closed — creating no pull request — when any
+# required record is absent, malformed or inconsistent with the rest.
 
 set -euo pipefail
 
@@ -152,29 +156,159 @@ op_push() {
 }
 
 # --------------------------------------------------------------------------
+# PR evidence (Issue #28)
+#
+# The pull-request body is assembled EXCLUSIVELY from workflow-owned persisted
+# artefacts: the state document, the reviewed candidate manifest, and the
+# records under <state-dir>/records/. Prompt text, model prose, branch names and
+# ambient environment variables are never consulted, and no value is ever
+# defaulted: a missing or inconsistent record means no pull request at all.
+# --------------------------------------------------------------------------
+
+_PR_ISSUE=""; _PR_RUN_ID=""; _PR_BASE_BRANCH=""; _PR_BASE_COMMIT=""
+_PR_CONTRACT_HASH=""; _PR_REVIEWED_FP=""; _PR_WORKTREE_RESULT=""
+_PR_REVIEW_VERDICT=""; _PR_REVIEW_CRITICAL=""; _PR_REVIEW_MAJOR=""
+_PR_GATE_STATUS=""; _PR_STAGED_RESULT=""; _PR_STAGED_FP=""
+
+# collect_pr_evidence — resolve every required evidence field or fail closed.
+# Overwrites all _PR_* variables unconditionally, so an inherited environment
+# value can never survive into the rendered body.
+collect_pr_evidence() {
+  local mf wt_rec review_rec gate_rec staged_rec wt_fp review_fp gate_hash v
+
+  _PR_ISSUE="$(orch_field "$REPO" issue_number)"
+  _PR_RUN_ID="$(orch_field "$REPO" run_id)"
+  _PR_BASE_BRANCH="$(base_branch)"
+  _PR_BASE_COMMIT="$(orch_field "$REPO" base_commit)"
+  _PR_CONTRACT_HASH="$(orch_field "$REPO" contract_hash)"
+  for v in "$_PR_ISSUE" "$_PR_RUN_ID" "$_PR_BASE_BRANCH" "$_PR_BASE_COMMIT" "$_PR_CONTRACT_HASH"; do
+    [ -n "$v" ] ||
+      fail LIFECYCLE_EVIDENCE_MISSING "the recorded workflow state does not carry the required run identity"
+  done
+
+  # --- reviewed candidate --------------------------------------------------
+  mf="$(orch_reviewed_manifest_path "$REPO")"
+  _PR_REVIEWED_FP="$(orch_record_field "$mf" '.fingerprint')" ||
+    fail LIFECYCLE_REVIEW_EVIDENCE_MISSING "no reviewed candidate manifest fingerprint is stored"
+
+  # --- VERIFY_WORKTREE -----------------------------------------------------
+  wt_rec="$(orch_record_path "$REPO" "$ORCH_WORKTREE_RECORD_NAME")"
+  _PR_WORKTREE_RESULT="$(orch_record_field "$wt_rec" '.result')" ||
+    fail LIFECYCLE_WORKTREE_VERIFICATION_EVIDENCE_MISSING \
+      "no VERIFY_WORKTREE Verification Record is stored"
+  [ "$_PR_WORKTREE_RESULT" = PASS ] ||
+    fail LIFECYCLE_WORKTREE_VERIFICATION_EVIDENCE_MISSING \
+      "the recorded VERIFY_WORKTREE result is not PASS"
+  wt_fp="$(orch_record_field "$wt_rec" '.candidate.fingerprint')" ||
+    fail LIFECYCLE_WORKTREE_VERIFICATION_EVIDENCE_MISSING \
+      "the VERIFY_WORKTREE record carries no candidate fingerprint"
+  # The reviewed candidate must be the verified candidate — the same integrity
+  # relationship the controller already asserts when it captures the manifest.
+  [ "$wt_fp" = "$_PR_REVIEWED_FP" ] ||
+    fail LIFECYCLE_EVIDENCE_STALE \
+      "the reviewed candidate fingerprint does not match the verified candidate"
+
+  # --- independent review --------------------------------------------------
+  review_rec="$(orch_record_path "$REPO" "$ORCH_REVIEW_RECORD_NAME")"
+  [ -f "$review_rec" ] ||
+    fail LIFECYCLE_REVIEW_EVIDENCE_MISSING "no independent review record is stored"
+  jq -e '(.verdict | type == "string")
+         and (.critical | type == "number" and . == floor and . >= 0)
+         and (.major    | type == "number" and . == floor and . >= 0)' \
+     "$review_rec" >/dev/null 2>&1 ||
+    fail LIFECYCLE_REVIEW_EVIDENCE_MISSING "the stored independent review record is malformed"
+  _PR_REVIEW_VERDICT="$(orch_record_field "$review_rec" '.verdict')" ||
+    fail LIFECYCLE_REVIEW_EVIDENCE_MISSING "the review record carries no verdict"
+  _PR_REVIEW_CRITICAL="$(jq -r '.critical' "$review_rec")"
+  _PR_REVIEW_MAJOR="$(jq -r '.major' "$review_rec")"
+  { [ "$_PR_REVIEW_VERDICT" = PASS ] && [ "$_PR_REVIEW_CRITICAL" = 0 ] && [ "$_PR_REVIEW_MAJOR" = 0 ]; } ||
+    fail LIFECYCLE_REVIEW_EVIDENCE_MISSING \
+      "the stored independent review record does not clear both blocking severities"
+  review_fp="$(orch_record_field "$review_rec" '.reviewed_fingerprint')" ||
+    fail LIFECYCLE_REVIEW_EVIDENCE_MISSING "the review record carries no reviewed candidate fingerprint"
+  [ "$review_fp" = "$_PR_REVIEWED_FP" ] ||
+    fail LIFECYCLE_EVIDENCE_STALE "the stored review evidence describes a different candidate"
+
+  # --- Human Gate settlement ----------------------------------------------
+  gate_rec="$(orch_record_path "$REPO" "$ORCH_HUMAN_GATE_RECORD_NAME")"
+  _PR_GATE_STATUS="$(orch_record_field "$gate_rec" '.status')" ||
+    fail LIFECYCLE_HUMAN_GATE_EVIDENCE_MISSING "no Human Gate settlement record is stored"
+  case "$_PR_GATE_STATUS" in
+    none | resolved) : ;;
+    *) fail LIFECYCLE_HUMAN_GATE_EVIDENCE_MISSING "the recorded Human Gate state is not settled" ;;
+  esac
+  gate_hash="$(orch_record_field "$gate_rec" '.contract_hash')" ||
+    fail LIFECYCLE_HUMAN_GATE_EVIDENCE_MISSING "the Human Gate record carries no contract hash"
+  [ "$gate_hash" = "$_PR_CONTRACT_HASH" ] ||
+    fail LIFECYCLE_EVIDENCE_STALE \
+      "the Human Gate evidence was recorded against a different issue contract"
+
+  # --- VERIFY_STAGED -------------------------------------------------------
+  staged_rec="$(orch_record_path "$REPO" "$ORCH_STAGED_RECORD_NAME")"
+  _PR_STAGED_RESULT="$(orch_record_field "$staged_rec" '.result')" ||
+    fail LIFECYCLE_STAGED_VERIFICATION_EVIDENCE_MISSING \
+      "no VERIFY_STAGED Verification Record is stored"
+  [ "$_PR_STAGED_RESULT" = PASS ] ||
+    fail LIFECYCLE_STAGED_VERIFICATION_EVIDENCE_MISSING \
+      "the recorded VERIFY_STAGED result is not PASS"
+  _PR_STAGED_FP="$(orch_record_field "$staged_rec" \
+    'first(.checks[]? | select(.id == "staged_match" and .classification == "PASS")
+                      | .staged_evidence.staged_fingerprint)')" ||
+    fail LIFECYCLE_STAGED_VERIFICATION_EVIDENCE_MISSING \
+      "the VERIFY_STAGED record carries no staged candidate fingerprint"
+}
+
+# pr_body — render the evidence collected above. Every value is a variable set
+# by collect_pr_evidence; nothing is read from the environment or the worktree.
+pr_body() {
+  printf '%s\n\n' "$(subject)"
+  printf 'Closes #%s\n\n' "$_PR_ISSUE"
+  printf 'Produced by the deterministic Engineering Workflow v1 orchestration.\n'
+  printf 'Every value below is taken from persisted workflow state and recorded\n'
+  printf 'verification/review evidence; no model-generated text contributes to it.\n\n'
+  printf '## Workflow evidence\n\n'
+  printf '| Field | Value |\n'
+  printf '| --- | --- |\n'
+  printf '| Issue | #%s |\n'                                  "$_PR_ISSUE"
+  printf '| Run id | %s |\n'                                  "$_PR_RUN_ID"
+  printf '| Base branch | %s |\n'                             "$_PR_BASE_BRANCH"
+  printf '| Base commit | %s |\n'                             "$_PR_BASE_COMMIT"
+  printf '| Contract hash | %s |\n'                           "$_PR_CONTRACT_HASH"
+  printf '| Reviewed candidate fingerprint | %s |\n'          "$_PR_REVIEWED_FP"
+  printf '| VERIFY_WORKTREE result | %s |\n'                  "$_PR_WORKTREE_RESULT"
+  printf '| Independent review verdict | %s |\n'              "$_PR_REVIEW_VERDICT"
+  printf '| Independent review Critical findings | %s |\n'    "$_PR_REVIEW_CRITICAL"
+  printf '| Independent review Major findings | %s |\n'       "$_PR_REVIEW_MAJOR"
+  printf '| Human Gate resolution | %s |\n'                   "$_PR_GATE_STATUS"
+  printf '| VERIFY_STAGED result | %s |\n'                    "$_PR_STAGED_RESULT"
+  printf '| Staged candidate fingerprint | %s |\n\n'          "$_PR_STAGED_FP"
+  printf 'Human review and merge are required; this workflow never merges.\n'
+}
+
+# --------------------------------------------------------------------------
 # create-pr — CREATE_PR only, after the branch exists on the remote
 # --------------------------------------------------------------------------
 
 op_create_pr() {
   orch_require_phase "$REPO" CREATE_PR >/dev/null
+
+  # Evidence is resolved BEFORE anything is written and before GitHub is
+  # contacted: incomplete or inconsistent workflow evidence means no pull
+  # request is created at all.
+  collect_pr_evidence
+
   require_cmd gh LIFECYCLE_TOOLING_MISSING
 
   local branch base
   branch="$(feature_branch)"
-  base="$(base_branch)"
+  base="$_PR_BASE_BRANCH"
 
   git_repo rev-parse --verify --quiet "refs/remotes/$ORCH_REMOTE/$branch" >/dev/null ||
     fail LIFECYCLE_NOT_PUSHED "the feature branch is not present on $ORCH_REMOTE; push first"
 
   local body; body="$(orch_state_dir "$REPO")/$ORCH_PR_BODY_NAME"
-  {
-    printf '%s\n\n' "$(subject)"
-    printf 'Closes #%s\n\n' "$(orch_field "$REPO" issue_number)"
-    printf 'Produced by the deterministic Engineering Workflow v1 orchestration.\n'
-    printf 'Run id: %s\n' "$(orch_field "$REPO" run_id)"
-    printf 'Base: %s@%s\n\n' "$base" "$(orch_field "$REPO" base_commit)"
-    printf 'Human review and merge are required; this workflow never merges.\n'
-  } >"$body"
+  pr_body >"$body"
+  chmod 600 "$body" 2>/dev/null || true
 
   local out url number
   out="$(gh pr create --base "$base" --head "$branch" \

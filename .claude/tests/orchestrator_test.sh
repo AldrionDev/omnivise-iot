@@ -76,7 +76,9 @@ assert_eq   "happy: REVIEW dispatches a fresh reviewer" "true" "$(printf '%s' "$
 assert_eq   "happy: review_attempts incremented" "1" "$(fxo_state "$H" get review_attempts)"
 
 H_SD="$(fxo_state_dir "$H")"
+H_REC="$H_SD/records"
 assert_file_absent "happy: no reviewed manifest exists before review PASS" "$H_SD/reviewed-manifest.json"
+assert_file_absent "happy: no review evidence exists before review PASS" "$H_REC/review.json"
 
 run_capture fxo_orch "$H" review-pass
 assert_eq   "happy: -> RESOLVE_HUMAN_GATES" "RESOLVE_HUMAN_GATES" "$(fxo_phase "$H")"
@@ -87,8 +89,34 @@ assert_eq   "happy: reviewed manifest matches the candidate fingerprint" \
 assert_eq   "happy: workflow evidence is not a candidate file" \
   "1" "$(bash "$CANDIDATE_SH" --repo-root "$H" list | jq 'length')"
 
-assert_ok "happy: gates-resolved (contract declares None)" fxo_orch "$H" gates-resolved
+# --- Issue #28: deterministic independent-review evidence
+assert_file_exists "evidence: review-pass persists independent review evidence" "$H_REC/review.json"
+assert_eq "evidence: the recorded review verdict" "PASS" "$(jq -r '.verdict' "$H_REC/review.json")"
+assert_eq "evidence: the recorded Critical count" "0" "$(jq -r '.critical' "$H_REC/review.json")"
+assert_eq "evidence: the recorded Major count" "0" "$(jq -r '.major' "$H_REC/review.json")"
+assert_eq "evidence: the review record is tied to the reviewed candidate" \
+  "$(jq -r '.fingerprint' "$H_SD/reviewed-manifest.json")" \
+  "$(jq -r '.reviewed_fingerprint' "$H_REC/review.json")"
+assert_eq "evidence: the review record's authority is the orchestration event" \
+  "orchestration-event" "$(jq -r '.source' "$H_REC/review.json")"
+assert_eq "evidence: the review record persists only deterministic fields" \
+  "critical,event,major,recorded_at,review_attempts,review_correction_rounds,reviewed_fingerprint,schema_version,source,verdict" \
+  "$(jq -r '[keys[]] | join(",")' "$H_REC/review.json")"
+
+assert_file_absent "evidence: no gate evidence exists before gates-resolved" "$H_REC/human-gate.json"
+run_capture fxo_orch "$H" gates-resolved
+assert_eq "happy: gates-resolved (contract declares None)" "0" "$RC"
 assert_eq "happy: -> STAGE" "STAGE" "$(fxo_phase "$H")"
+
+# --- Issue #28: explicit Human Gate settlement evidence
+assert_file_exists "evidence: gates-resolved persists the gate settlement" "$H_REC/human-gate.json"
+assert_eq "evidence: the recorded Human Gate state" "none" "$(jq -r '.status' "$H_REC/human-gate.json")"
+assert_eq "evidence: the gate settlement is reported by the event" "none" \
+  "$(printf '%s' "$OUT" | jq -r '.human_gates')"
+assert_eq "evidence: the gate record is tied to the recorded contract" \
+  "$(fxo_state "$H" get contract_hash)" "$(jq -r '.contract_hash' "$H_REC/human-gate.json")"
+assert_eq "evidence: the gate record's authority is the contract parser" \
+  "issue-contract-parser" "$(jq -r '.source' "$H_REC/human-gate.json")"
 assert_eq "happy: the index is still empty entering STAGE" "" "$(git -C "$H" diff --cached --name-only)"
 
 assert_ok "happy: stage" fxo_orch "$H" stage
@@ -122,6 +150,23 @@ assert_eq "happy: the PR number is recorded" "4242" "$(fxo_state "$H" get pr_num
 assert_contains "happy: the PR URL is recorded" "$(fxo_state "$H" get pr_url)" "/pull/4242"
 assert_contains "happy: gh created a pull request" "$(cat "$FXO_GH_LOG")" "pr create"
 assert_not_contains "happy: gh was never asked to merge" "$(cat "$FXO_GH_LOG")" "merge"
+
+# --- Issue #28: the controller's PR carries the recorded workflow evidence
+H_BODY="$(cat "$H_SD/pr-body.md")"
+assert_contains "evidence: the PR body carries the run id" "$H_BODY" \
+  "| Run id | $(fxo_state "$H" get run_id) |"
+assert_contains "evidence: the PR body carries the base commit" "$H_BODY" \
+  "| Base commit | $(fxo_state "$H" get base_commit) |"
+assert_contains "evidence: the PR body carries the VERIFY_WORKTREE result" "$H_BODY" \
+  "| VERIFY_WORKTREE result | PASS |"
+assert_contains "evidence: the PR body carries the review verdict" "$H_BODY" \
+  "| Independent review verdict | PASS |"
+assert_contains "evidence: the PR body carries the VERIFY_STAGED result" "$H_BODY" \
+  "| VERIFY_STAGED result | PASS |"
+assert_contains "evidence: the PR body carries the staged candidate fingerprint" "$H_BODY" \
+  "| Staged candidate fingerprint | $(jq -r 'first(.checks[] | select(.id == "staged_match") | .staged_evidence.staged_fingerprint)' "$H_REC/verify-staged.json") |"
+assert_contains "evidence: human review and merge remain mandatory" "$H_BODY" \
+  "Human review and merge are required; this workflow never merges."
 
 assert_eq "happy: no model reasoning is persisted in workflow state" \
   "$(fxo_state "$H" status | jq -r '[keys[]] | join(",")')" \
@@ -411,6 +456,19 @@ assert_ok "gate seq: stage" fxo_orch "$G" stage
 assert_eq "gate seq: staging is still manifest-derived" \
   ".claude/scripts/orchestrated.sh" "$(git -C "$G" diff --cached --name-only)"
 
+# the settled gate is recorded as explicit evidence and reaches the PR body
+assert_eq "gate seq: the gate record captures the maintainer decision" "resolved" \
+  "$(jq -r '.status' "$(fxo_state_dir "$G")/records/human-gate.json")"
+assert_eq "gate seq: the gate record is tied to the settled contract" \
+  "$(fxo_state "$G" get contract_hash)" \
+  "$(jq -r '.contract_hash' "$(fxo_state_dir "$G")/records/human-gate.json")"
+fxo_orch "$G" verify-staged >/dev/null
+fxo_orch "$G" commit >/dev/null
+fxo_orch "$G" push >/dev/null
+assert_ok "gate seq: create-pr after a settled gate" fxo_orch "$G" create-pr
+assert_contains "gate seq: the PR body reports the resolved Human Gate" \
+  "$(cat "$(fxo_state_dir "$G")/pr-body.md")" "| Human Gate resolution | resolved |"
+
 # --- an already-resolved gate keeps the happy path
 boot 35 "Resolved gate probe"
 GR="$BOOT_WT"
@@ -441,6 +499,41 @@ for gm_variant in gates-malformed gates-none-unchecked; do
   assert_eq "gate structure: '$gm_variant' records CONTRACT_INVALID" \
     "CONTRACT_INVALID" "$(fxo_state "$GM" get blocker_code)"
 done
+
+# ========================================================================
+# 6b. PR evidence fails closed through the controller (Issue #28)
+# ========================================================================
+#
+# The lifecycle suite covers each individual evidence refusal; here the point is
+# that an incomplete evidence set reaching the CONTROLLER produces no pull
+# request, no recorded PR data, and a deterministic off-ramp.
+
+boot 37 "PR evidence fail-closed probe"
+FC="$BOOT_WT"
+fxo_set_verify PASS
+fxo_drive_to_review "$FC"
+fxo_orch "$FC" review-pass >/dev/null
+fxo_orch "$FC" gates-resolved >/dev/null
+fxo_orch "$FC" stage >/dev/null
+fxo_orch "$FC" verify-staged >/dev/null
+fxo_orch "$FC" commit >/dev/null
+fxo_orch "$FC" push >/dev/null
+rm -f "$(fxo_state_dir "$FC")/records/review.json"
+
+: >"$FXO_GH_LOG"
+run_capture fxo_orch "$FC" create-pr
+assert_ne "pr fail-closed: create-pr exits non-zero without review evidence" "0" "$RC"
+assert_not_contains "pr fail-closed: no pull request was created" "$(cat "$FXO_GH_LOG")" "pr create"
+assert_file_absent "pr fail-closed: no PR body was written" \
+  "$(fxo_state_dir "$FC")/pr-body.md"
+assert_eq "pr fail-closed: no PR number was recorded" "" "$(fxo_state "$FC" get pr_number)"
+assert_eq "pr fail-closed: no PR URL was recorded" "" "$(fxo_state "$FC" get pr_url)"
+assert_eq "pr fail-closed: the run entered the deterministic failure off-ramp" \
+  "FAILED" "$(fxo_phase "$FC")"
+assert_eq "pr fail-closed: the blocker is recorded" \
+  "LIFECYCLE_FAILED" "$(fxo_state "$FC" get blocker_code)"
+assert_eq "pr fail-closed: PR_READY_FOR_HUMAN_REVIEW was never reached" \
+  "FAILED" "$(fxo_phase "$FC")"
 
 # ========================================================================
 # 7. Phase gating and grammar
