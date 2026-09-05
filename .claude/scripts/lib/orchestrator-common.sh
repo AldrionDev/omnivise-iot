@@ -46,6 +46,8 @@ readonly ORCH_REVIEWED_MANIFEST_NAME="reviewed-manifest.json"
 readonly ORCH_RECORDS_DIR_NAME="records"
 readonly ORCH_WORKTREE_RECORD_NAME="verify-worktree.json"
 readonly ORCH_STAGED_RECORD_NAME="verify-staged.json"
+readonly ORCH_REVIEW_RECORD_NAME="review.json"
+readonly ORCH_HUMAN_GATE_RECORD_NAME="human-gate.json"
 readonly ORCH_PR_BODY_NAME="pr-body.md"
 
 # Deterministic worktree layout: a sibling of the primary checkout.
@@ -85,6 +87,33 @@ orch_state_dir() {
 orch_contract_path()          { printf '%s/%s' "$(orch_state_dir "$1")" "$ORCH_CONTRACT_FILE_NAME"; }
 orch_reviewed_manifest_path() { printf '%s/%s' "$(orch_state_dir "$1")" "$ORCH_REVIEWED_MANIFEST_NAME"; }
 orch_records_dir()            { printf '%s/%s' "$(orch_state_dir "$1")" "$ORCH_RECORDS_DIR_NAME"; }
+orch_record_path()            { printf '%s/%s' "$(orch_records_dir "$1")" "$2"; }
+
+# orch_write_record REPO NAME JSON — persist one deterministic workflow record
+# beside the state document. Records are workflow evidence, never candidate
+# files, and carry only closed fields the deterministic layer produced itself.
+orch_write_record() {
+  local repo="$1" name="$2" json="$3" dir f
+  dir="$(orch_records_dir "$repo")" || return 1
+  mkdir -p "$dir" || return 1
+  f="$dir/$name"
+  printf '%s\n' "$json" >"$f" || return 1
+  chmod 600 "$f" 2>/dev/null || true
+  return 0
+}
+
+# orch_record_field FILE FILTER — read one scalar out of a persisted record.
+# Returns non-zero (printing nothing) when the record is absent or the field is
+# missing, empty or null, so every caller must decide explicitly what to do:
+# nothing here ever substitutes a default.
+orch_record_field() {
+  local f="$1" filter="$2" v
+  [ -f "$f" ] || return 1
+  v="$(jq -r "$filter" "$f" 2>/dev/null)" || return 1
+  case "$v" in "" | null) return 1 ;; esac
+  printf '%s' "$v"
+  return 0
+}
 
 # orch_require_state REPO — the state document must exist and validate.
 orch_require_state() {

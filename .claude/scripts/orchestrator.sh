@@ -265,12 +265,30 @@ ev_review_pass() {
   bash "$ORCH_CANDIDATE_SH" --repo-root "$REPO" manifest >"$mf" ||
     fail ORCHESTRATOR_MANIFEST_CAPTURE_FAILED "could not capture the reviewed candidate manifest"
   chmod 600 "$mf" 2>/dev/null || true
-  local rec; rec="$(record_path "$ORCH_WORKTREE_RECORD_NAME")"
-  [ "$(jq -r '.fingerprint' "$mf")" = "$(jq -r '.candidate.fingerprint' "$rec")" ] ||
+  local rec fp; rec="$(record_path "$ORCH_WORKTREE_RECORD_NAME")"
+  fp="$(jq -r '.fingerprint' "$mf")"
+  [ "$fp" = "$(jq -r '.candidate.fingerprint' "$rec")" ] ||
     fail ORCHESTRATOR_CANDIDATE_CHANGED "the reviewed candidate no longer matches the verified candidate"
 
+  # Deterministic independent-review evidence (Issue #28). The authority is the
+  # orchestration EVENT, never reviewer prose: `review-pass` is the only route
+  # out of REVIEW that reaches RESOLVE_HUMAN_GATES, and a review that reported a
+  # Critical or Major finding must travel `review-changes-required` instead. So
+  # a stored record can only exist for a review that cleared both blocking
+  # severities, and the closed fields below are the whole record — no free-form
+  # model text is ever persisted or rendered anywhere downstream.
+  orch_write_record "$REPO" "$ORCH_REVIEW_RECORD_NAME" "$(jq -cn \
+    --arg fp "$fp" --arg at "$(now_utc)" \
+    --argjson attempts "$(orch_field "$REPO" review_attempts)" \
+    --argjson rounds "$(orch_field "$REPO" review_correction_rounds)" \
+    '{schema_version:1, source:"orchestration-event", event:"review-pass",
+      verdict:"PASS", critical:0, major:0,
+      review_attempts:$attempts, review_correction_rounds:$rounds,
+      reviewed_fingerprint:$fp, recorded_at:$at}')" ||
+    fail ORCHESTRATOR_REVIEW_RECORD_FAILED "could not persist the independent review evidence"
+
   transition RESOLVE_HUMAN_GATES
-  emit review-pass OK "$(jq -cn --arg fp "$(jq -r '.fingerprint' "$mf")" '{reviewed_fingerprint:$fp}')"
+  emit review-pass OK "$(jq -cn --arg fp "$fp" '{reviewed_fingerprint:$fp}')"
 }
 
 ev_review_changes_required() {
@@ -309,8 +327,24 @@ ev_gates_resolved() {
   require_gates_settled
   [ -f "$(orch_reviewed_manifest_path "$REPO")" ] ||
     fail ORCHESTRATOR_REVIEWED_MANIFEST_MISSING "no reviewed candidate manifest was captured"
+
+  # Explicit Human Gate settlement evidence (Issue #28): the deterministic
+  # parser's verdict on the STORED contract, together with the hash of the exact
+  # contract it was read from. Downstream evidence therefore never has to infer
+  # "resolved" from the fact that a later phase was reached.
+  local gate_status contract_hash
+  gate_status="$(contract_gate_status)"
+  contract_hash="$(bash "$ORCH_CONTRACT_SH" hash "$(contract_file)" 2>/dev/null)" || contract_hash=""
+  [ -n "$contract_hash" ] ||
+    fail ORCHESTRATOR_GATE_RECORD_FAILED "could not hash the stored issue contract for the Human Gate record"
+  orch_write_record "$REPO" "$ORCH_HUMAN_GATE_RECORD_NAME" "$(jq -cn \
+    --arg s "$gate_status" --arg h "$contract_hash" --arg at "$(now_utc)" \
+    '{schema_version:1, source:"issue-contract-parser", event:"gates-resolved",
+      status:$s, contract_hash:$h, recorded_at:$at}')" ||
+    fail ORCHESTRATOR_GATE_RECORD_FAILED "could not persist the Human Gate settlement evidence"
+
   transition STAGE
-  emit gates-resolved OK
+  emit gates-resolved OK "$(jq -cn --arg s "$gate_status" '{human_gates:$s}')"
 }
 
 ev_stage() {

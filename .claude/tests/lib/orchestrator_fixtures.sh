@@ -52,10 +52,19 @@ while [ $# -gt 0 ]; do
 done
 result="$(cat "$FXO_CTL/verify-result" 2>/dev/null || printf 'PASS')"
 # Staged mode keeps the REAL staged-vs-reviewed proof: this is the property the
-# workflow depends on, so it is never stubbed away.
+# workflow depends on, so it is never stubbed away. The comparison output is
+# recorded as the `staged_match` check exactly as verify.sh records it, because
+# the staged candidate fingerprint downstream evidence reads lives in there.
+staged_check=""
 if [ "$mode" = staged ]; then
-  ok="$(bash "$CANDIDATE_SH" --repo-root "$repo" staged-compare --reviewed-manifest "$reviewed" 2>/dev/null | jq -r '.ok // false')"
+  cmp="$(bash "$CANDIDATE_SH" --repo-root "$repo" staged-compare --reviewed-manifest "$reviewed" 2>/dev/null)" || true
+  ok="$(printf '%s' "$cmp" | jq -r '.ok // false' 2>/dev/null || printf 'false')"
   [ "$ok" = true ] || result=FAIL_IMPLEMENTATION
+  if [ -n "$cmp" ]; then
+    staged_check="$(jq -cn --argjson ev "$cmp" --arg cls \
+      "$([ "$ok" = true ] && printf 'PASS' || printf 'FAIL_IMPLEMENTATION')" \
+      '{id:"staged_match", kind:"builtin", classification:$cls, staged_evidence:$ev}')"
+  fi
 fi
 fp="$(bash "$CANDIDATE_SH" --repo-root "$repo" fingerprint 2>/dev/null || printf '')"
 if [ "$result" = PASS ]; then
@@ -64,9 +73,11 @@ else
   suite=FAIL; cls="$result"; rc=1
 fi
 rec="$(jq -cn --arg mode "$mode" --arg fp "$fp" --arg suite "$suite" --arg cls "$cls" \
+  --argjson staged "${staged_check:-null}" \
   '{schema_version:1, verification_mode:$mode,
     candidate:{fingerprint:$fp, enumeration_ok:true, paths:[]},
-    checks:[{id:"stub", kind:"builtin", classification:$cls}],
+    checks:([{id:"stub", kind:"builtin", classification:$cls}]
+            + (if $staged == null then [] else [$staged] end)),
     result:$suite, stopped_early:false, stopped_reason:null}')"
 printf '%s\n' "$rec"
 [ -n "$record" ] && printf '%s\n' "$rec" >"$record"
