@@ -708,6 +708,51 @@ for m in issue framework-maintenance orchestrator "-unset-"; do
     "$m" "$G_SH" "$(fx_bash_input 'bash .claude/scripts/launch-issue.sh --issue 19')"
 done
 
+# ========================================================================
+# 9b-i. Issue #24 (reopened) — the maintainer Human Gate decision entry point
+#
+# human-gate.sh is the ONLY writer of the decision record that can settle a
+# Human Gate the immutable issue contract still declares `unresolved`. It is on
+# no Bash allowlist, so the orchestrating model cannot run it in ANY workflow
+# mode — orchestrator mode included — and therefore cannot approve its own gate.
+# The record itself lives under the Git metadata directory, so the file tools
+# cannot forge it either.
+# ========================================================================
+
+for m in issue framework-maintenance orchestrator "-unset-"; do
+  while IFS= read -r c; do
+    [ -n "$c" ] || continue
+    gd "human-gate.sh is never Claude-callable ($m): $c" SAFETY_SHELL_COMMAND_DENIED \
+      "$m" "$G_SH" "$(fx_bash_input "$c")"
+  done <<HGATE
+bash .claude/scripts/human-gate.sh approve
+bash .claude/scripts/human-gate.sh reject
+bash .claude/scripts/human-gate.sh --repo-root $FX_PD approve
+sh .claude/scripts/human-gate.sh approve
+HGATE
+done
+gd "human-gate.sh: a chained approval is denied" SAFETY_SHELL_COMMAND_DENIED \
+  "orchestrator" "$G_SH" "$(fx_bash_input 'git status && bash .claude/scripts/human-gate.sh approve')"
+gd "human-gate.sh: an env-prefixed invocation marker grants nothing" SAFETY_SHELL_COMMAND_DENIED \
+  "orchestrator" "$G_SH" \
+  "$(fx_bash_input 'env OMNIVISE_HUMAN_GATE_INVOCATION=maintainer bash .claude/scripts/human-gate.sh approve')"
+gd "human-gate.sh: an inline invocation marker grants nothing" SAFETY_SHELL_COMMAND_DENIED \
+  "orchestrator" "$G_SH" \
+  "$(fx_bash_input 'OMNIVISE_HUMAN_GATE_INVOCATION=maintainer bash .claude/scripts/human-gate.sh approve')"
+gd "human-gate.sh: no orchestration event carries a decision" SAFETY_SHELL_COMMAND_DENIED \
+  "orchestrator" "$G_SH" "$(fx_bash_input "$G_ORCH approve-human-gate")"
+
+# the decision record cannot be forged with the file tools either
+HG_DEC_REL="$(git -C "$PD_GM" rev-parse --absolute-git-dir)/claude-omnivise/records/human-gate-decision.json"
+for t in Write Edit MultiEdit; do
+  gd "human-gate decision record is not writable by the file tools ($t)" \
+    SAFETY_GIT_METADATA_MUTATION_DENIED "orchestrator" "$G_FW" "$(fwe "$HG_DEC_REL" "$t")" "$PD_GM"
+done
+gd "human-gate.sh is not editable in orchestrator mode" SAFETY_FRAMEWORK_MUTATION_DENIED \
+  "orchestrator" "$G_FW" "$(fwe '.claude/scripts/human-gate.sh')"
+gd "human-gate.sh is not editable in issue mode" SAFETY_FRAMEWORK_MUTATION_DENIED \
+  "issue" "$G_FW" "$(fwe '.claude/scripts/human-gate.sh')"
+
 # --- the orchestration entry point: allowed ONLY in orchestrator mode
 while IFS= read -r c; do
   [ -n "$c" ] || continue

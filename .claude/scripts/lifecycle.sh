@@ -174,7 +174,8 @@ _PR_GATE_STATUS=""; _PR_STAGED_RESULT=""; _PR_STAGED_FP=""
 # Overwrites all _PR_* variables unconditionally, so an inherited environment
 # value can never survive into the rendered body.
 collect_pr_evidence() {
-  local mf wt_rec review_rec gate_rec staged_rec wt_fp review_fp gate_hash v
+  local mf wt_rec review_rec gate_rec staged_rec wt_fp review_fp v
+  local gate_hash gate_run gate_issue gate_fp
 
   _PR_ISSUE="$(orch_field "$REPO" issue_number)"
   _PR_RUN_ID="$(orch_field "$REPO" run_id)"
@@ -233,8 +234,12 @@ collect_pr_evidence() {
   gate_rec="$(orch_record_path "$REPO" "$ORCH_HUMAN_GATE_RECORD_NAME")"
   _PR_GATE_STATUS="$(orch_record_field "$gate_rec" '.status')" ||
     fail LIFECYCLE_HUMAN_GATE_EVIDENCE_MISSING "no Human Gate settlement record is stored"
+  # The settled states the controller can produce: a contract that declared no
+  # gate, a contract that already carried a settled gate, and a gate an explicit
+  # maintainer decision approved (Issue #24, reopened scope). The rendered body
+  # therefore distinguishes those cases instead of flattening them.
   case "$_PR_GATE_STATUS" in
-    none | resolved) : ;;
+    none | resolved | "$ORCH_MAINTAINER_APPROVED_STATUS") : ;;
     *) fail LIFECYCLE_HUMAN_GATE_EVIDENCE_MISSING "the recorded Human Gate state is not settled" ;;
   esac
   gate_hash="$(orch_record_field "$gate_rec" '.contract_hash')" ||
@@ -242,6 +247,19 @@ collect_pr_evidence() {
   [ "$gate_hash" = "$_PR_CONTRACT_HASH" ] ||
     fail LIFECYCLE_EVIDENCE_STALE \
       "the Human Gate evidence was recorded against a different issue contract"
+  # The gate evidence must describe THIS run and the candidate that was actually
+  # reviewed — the same integrity relationship every other record here carries.
+  gate_run="$(orch_record_field "$gate_rec" '.run_id')" ||
+    fail LIFECYCLE_HUMAN_GATE_EVIDENCE_MISSING "the Human Gate record carries no run id"
+  gate_issue="$(orch_record_field "$gate_rec" '.issue_number')" ||
+    fail LIFECYCLE_HUMAN_GATE_EVIDENCE_MISSING "the Human Gate record carries no issue number"
+  gate_fp="$(orch_record_field "$gate_rec" '.reviewed_fingerprint')" ||
+    fail LIFECYCLE_HUMAN_GATE_EVIDENCE_MISSING \
+      "the Human Gate record carries no reviewed candidate fingerprint"
+  { [ "$gate_run" = "$_PR_RUN_ID" ] && [ "$gate_issue" = "$_PR_ISSUE" ] &&
+    [ "$gate_fp" = "$_PR_REVIEWED_FP" ]; } ||
+    fail LIFECYCLE_EVIDENCE_STALE \
+      "the Human Gate evidence describes a different run, issue or candidate"
 
   # --- VERIFY_STAGED -------------------------------------------------------
   staged_rec="$(orch_record_path "$REPO" "$ORCH_STAGED_RECORD_NAME")"

@@ -18,6 +18,7 @@
 ORCH_SH="$SCRIPTS_DIR/orchestrator.sh"
 LAUNCH_SH="$SCRIPTS_DIR/launch-issue.sh"
 LIFECYCLE_SH="$SCRIPTS_DIR/lifecycle.sh"
+HUMAN_GATE_SH="$SCRIPTS_DIR/human-gate.sh"
 
 # --------------------------------------------------------------------------
 # Stub executables and the verify substitute
@@ -40,13 +41,15 @@ cat >"$FXO_VERIFY_STUB" <<'STUB'
 # the REAL candidate fingerprint so the orchestrator's freshness checks are
 # exercised for real.
 set -uo pipefail
-mode=worktree; repo="$PWD"; record=""; reviewed=""
+mode=worktree; repo="$PWD"; record=""; reviewed=""; run_id=""; issue=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --mode) mode="$2"; shift 2 ;;
     --repo-root) repo="$2"; shift 2 ;;
     --record) record="$2"; shift 2 ;;
     --reviewed-manifest) reviewed="$2"; shift 2 ;;
+    --run-id) run_id="$2"; shift 2 ;;
+    --issue-number) issue="$2"; shift 2 ;;
     *) shift ;;
   esac
 done
@@ -72,9 +75,15 @@ if [ "$result" = PASS ]; then
 else
   suite=FAIL; cls="$result"; rc=1
 fi
+# The record's run/issue provenance is NOT stubbed away: verify.sh records the
+# --run-id / --issue-number it was given, in those exact JSON types, and the
+# Human Gate approval path binds to them.
 rec="$(jq -cn --arg mode "$mode" --arg fp "$fp" --arg suite "$suite" --arg cls "$cls" \
+  --arg run "$run_id" --arg issue "$issue" \
   --argjson staged "${staged_check:-null}" \
   '{schema_version:1, verification_mode:$mode,
+    run_id:(if $run == "" then null else $run end),
+    issue_number:(if $issue == "" then null else ($issue|tonumber) end),
     candidate:{fingerprint:$fp, enumeration_ok:true, paths:[]},
     checks:([{id:"stub", kind:"builtin", classification:$cls}]
             + (if $staged == null then [] else [$staged] end)),
@@ -198,6 +207,32 @@ fxo_lifecycle() {
   [ "$inv" != "-unset-" ] && e+=("OMNIVISE_LIFECYCLE_INVOCATION=$inv")
   e+=("FXO_GH_LOG=$FXO_GH_LOG" "PATH=$FXO_BIN:$PATH")
   "${e[@]}" bash "$LIFECYCLE_SH" --repo-root "$repo" "$op"
+}
+
+# fxo_gate MODE INVOCATION REPO DECISION [ARGS...] — call the maintainer Human
+# Gate decision entry point with an explicit environment. The real maintainer
+# invocation is `fxo_gate "-unset-" maintainer <repo> approve|reject`: no
+# workflow mode at all (the decision is taken outside the orchestrated run) plus
+# the explicit invocation marker.
+fxo_gate() {
+  local mode="$1" inv="$2" repo="$3" decision="$4"; shift 4
+  local -a e=(env)
+  [ "$mode" = "-unset-" ] && e+=(-u OMNIVISE_WORKFLOW_MODE)
+  [ "$inv" = "-unset-" ] && e+=(-u OMNIVISE_HUMAN_GATE_INVOCATION)
+  [ "$mode" != "-unset-" ] && e+=("OMNIVISE_WORKFLOW_MODE=$mode")
+  [ "$inv" != "-unset-" ] && e+=("OMNIVISE_HUMAN_GATE_INVOCATION=$inv")
+  e+=("PATH=$FXO_BIN:$PATH")
+  "${e[@]}" bash "$HUMAN_GATE_SH" --repo-root "$repo" "$decision" "$@"
+}
+
+# fxo_gate_approve / fxo_gate_reject REPO — the maintainer decision, taken the
+# only way the boundary permits.
+fxo_gate_approve() { fxo_gate "-unset-" maintainer "$1" approve; }
+fxo_gate_reject()  { fxo_gate "-unset-" maintainer "$1" reject; }
+
+# fxo_decision_path REPO — the persisted maintainer decision record.
+fxo_decision_path() {
+  printf '%s/records/human-gate-decision.json' "$(fxo_state_dir "$1")"
 }
 
 # fxo_state REPO ARGS... — read/drive workflow state directly (test scaffolding).
