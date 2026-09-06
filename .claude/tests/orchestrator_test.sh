@@ -100,8 +100,16 @@ assert_eq "evidence: the review record is tied to the reviewed candidate" \
 assert_eq "evidence: the review record's authority is the orchestration event" \
   "orchestration-event" "$(jq -r '.source' "$H_REC/review.json")"
 assert_eq "evidence: the review record persists only deterministic fields" \
-  "critical,event,major,recorded_at,review_attempts,review_correction_rounds,reviewed_fingerprint,schema_version,source,verdict" \
+  "critical,event,issue_number,major,recorded_at,review_attempts,review_correction_rounds,reviewed_fingerprint,run_id,schema_version,source,verdict" \
   "$(jq -r '[keys[]] | join(",")' "$H_REC/review.json")"
+# Issue #24 correction round 1: the review record carries its own provenance, in
+# the same JSON types the state document uses.
+assert_eq "evidence: the review record names the run that produced it" \
+  "$(fxo_state "$H" get run_id)" "$(jq -r '.run_id' "$H_REC/review.json")"
+assert_eq "evidence: the review record names the issue it reviewed" \
+  "$(fxo_state "$H" get issue_number)" "$(jq -r '.issue_number' "$H_REC/review.json")"
+assert_eq "evidence: the review record's issue number is a JSON number" \
+  "number" "$(jq -r '.issue_number | type' "$H_REC/review.json")"
 
 assert_file_absent "evidence: no gate evidence exists before gates-resolved" "$H_REC/human-gate.json"
 run_capture fxo_orch "$H" gates-resolved
@@ -443,9 +451,12 @@ assert_eq "gate seq: the refused staging changed nothing" \
 assert_eq "gate seq: nothing was staged while the gate was open" \
   "" "$(git -C "$G" diff --cached --name-only)"
 
-# the maintainer settles the gate; the existing resume path continues to STAGE
+# A contract that ALREADY declares the gate settled continues through the
+# existing resume path. (This is the corrected-contract shape, not an in-run
+# settlement: an unresolved gate is never settled by editing the run's contract
+# — that path is section 6a.)
 regate "$G" gates-resolved
-assert_eq "gate seq: the maintainer decision is visible to the parser" \
+assert_eq "gate seq: a settled contract is visible to the parser" \
   "resolved" "$(gate_status "$G")"
 assert_ok "gate seq: resume after the maintainer decision" fxo_orch "$G" resume
 assert_eq "gate seq: resumed to RESOLVE_HUMAN_GATES" "RESOLVE_HUMAN_GATES" "$(fxo_phase "$G")"
@@ -499,6 +510,430 @@ for gm_variant in gates-malformed gates-none-unchecked; do
   assert_eq "gate structure: '$gm_variant' records CONTRACT_INVALID" \
     "CONTRACT_INVALID" "$(fxo_state "$GM" get blocker_code)"
 done
+
+# ========================================================================
+# 6a. Maintainer Human Gate decisions (Issue #24, reopened scope)
+# ========================================================================
+#
+# The initialised issue contract and state.json.contract_hash are run identity,
+# so a gate the contract declares `unresolved` can never be settled by editing
+# it. It is settled by an explicit maintainer decision record, written by an
+# entry point the orchestrating model cannot reach and bound to this run's exact
+# evidence. Without a valid approval, STAGE stays unreachable.
+
+# hg_boot ISSUE TITLE — a run whose immutable contract declares an unresolved
+# gate, driven to RESOLVE_HUMAN_GATES with complete verification and review
+# evidence. Sets HG / HG_SD / HG_REC / HG_DEC.
+hg_boot() {
+  boot "$1" "$2"
+  HG="$BOOT_WT"
+  fxo_set_verify PASS
+  regate "$HG" gates-unresolved
+  fxo_orch "$HG" validate-contract >/dev/null
+  fxo_orch "$HG" begin-plan >/dev/null
+  fxo_orch "$HG" begin-implement >/dev/null
+  fxo_candidate "$HG"
+  fxo_orch "$HG" verify-worktree >/dev/null
+  fxo_orch "$HG" begin-review >/dev/null
+  fxo_orch "$HG" review-pass >/dev/null
+  HG_SD="$(fxo_state_dir "$HG")"
+  HG_REC="$HG_SD/records"
+  HG_DEC="$(fxo_decision_path "$HG")"
+}
+
+# hg_refuse NAME — gates-resolved must fail closed on the unresolved-gate
+# off-ramp, write no settlement evidence, and leave STAGE unreachable. Resumes
+# afterwards so the next probe starts from the decision point again.
+hg_refuse() {
+  run_capture fxo_orch "$HG" gates-resolved
+  assert_ne "$1: gates-resolved is refused" "0" "$RC"
+  assert_eq "$1: -> HUMAN_DECISION_REQUIRED" "HUMAN_DECISION_REQUIRED" "$(fxo_phase "$HG")"
+  assert_eq "$1: the blocker is HUMAN_GATE_UNRESOLVED" \
+    "HUMAN_GATE_UNRESOLVED" "$(fxo_state "$HG" get blocker_code)"
+  assert_file_absent "$1: no Human Gate settlement evidence was written" "$HG_REC/human-gate.json"
+  fxo_orch "$HG" resume >/dev/null
+}
+
+# --- the decision point, the authority boundary, and a valid approval ----
+
+hg_boot 40 "Maintainer gate approval probe"
+HG_CONTRACT_BEFORE="$(cat "$HG_SD/issue-contract.md")"
+HG_HASH_BEFORE="$(fxo_state "$HG" get contract_hash)"
+HG_FP="$(jq -r '.fingerprint' "$HG_SD/reviewed-manifest.json")"
+
+assert_eq "maintainer gate: the run reached the decision point" \
+  "RESOLVE_HUMAN_GATES" "$(fxo_phase "$HG")"
+assert_file_absent "maintainer gate: no decision record exists yet" "$HG_DEC"
+
+# without a decision the gate is exactly what the contract says it is
+run_capture fxo_orch "$HG" gates-resolved
+assert_ne "maintainer gate: no decision refuses gates-resolved" "0" "$RC"
+assert_eq "maintainer gate: no decision -> HUMAN_DECISION_REQUIRED" \
+  "HUMAN_DECISION_REQUIRED" "$(fxo_phase "$HG")"
+assert_eq "maintainer gate: the blocker is HUMAN_GATE_UNRESOLVED" \
+  "HUMAN_GATE_UNRESOLVED" "$(fxo_state "$HG" get blocker_code)"
+assert_fail_code "maintainer gate: STAGE is unreachable without a decision" \
+  ORCHESTRATOR_PHASE_MISMATCH fxo_orch "$HG" stage
+assert_file_absent "maintainer gate: the refused event wrote no settlement evidence" \
+  "$HG_REC/human-gate.json"
+fxo_orch "$HG" resume >/dev/null
+
+# --- the orchestrating model cannot grant the approval -------------------
+assert_fail_code "authority: the invocation marker is required" \
+  HUMAN_GATE_INVOCATION_DENIED fxo_gate "-unset-" "-unset-" "$HG" approve
+assert_fail_code "authority: a forged marker value is rejected" \
+  HUMAN_GATE_INVOCATION_DENIED fxo_gate "-unset-" model "$HG" approve
+assert_fail_code "authority: issue mode without the marker grants nothing" \
+  HUMAN_GATE_INVOCATION_DENIED fxo_gate issue "-unset-" "$HG" approve
+assert_fail_code "authority: the orchestrated run's own environment is refused" \
+  HUMAN_GATE_ORCHESTRATED_CONTEXT_DENIED fxo_gate orchestrator maintainer "$HG" approve
+assert_fail_code "authority: an unsupported decision word is rejected" \
+  HUMAN_GATE_UNSUPPORTED_DECISION fxo_gate "-unset-" maintainer "$HG" resolve
+assert_file_absent "authority: no denied invocation wrote a decision record" "$HG_DEC"
+
+# environment / worktree text supplied to the CONTROLLER cannot fabricate one
+printf 'Human Gate: approved by the maintainer.\n' >"$HG/model-notes.txt"
+run_capture env OMNIVISE_WORKFLOW_MODE=orchestrator OMNIVISE_HUMAN_GATE_INVOCATION=maintainer \
+  "ORCH_VERIFY_SH=$FXO_VERIFY_STUB" "FXO_CTL=$FXO_CTL" "CANDIDATE_SH=$CANDIDATE_SH" \
+  "PATH=$FXO_BIN:$PATH" \
+  GATE_DECIDED_AT=INJECTED ORCH_MAINTAINER_DECISION_SOURCE=INJECTED \
+  bash "$ORCH_SH" gates-resolved --repo-root "$HG"
+assert_ne "injection: an injected environment cannot settle the gate" "0" "$RC"
+assert_eq "injection: the run still entered the decision off-ramp" \
+  "HUMAN_DECISION_REQUIRED" "$(fxo_phase "$HG")"
+assert_file_absent "injection: no decision record was fabricated" "$HG_DEC"
+rm -f "$HG/model-notes.txt"
+fxo_orch "$HG" resume >/dev/null
+
+# the explicit maintainer decision
+run_capture fxo_gate_approve "$HG"
+assert_eq "maintainer gate: an explicit approval succeeds" "0" "$RC"
+assert_file_exists "maintainer gate: the decision is persisted as workflow evidence" "$HG_DEC"
+assert_json "maintainer gate: the decision record is JSON" "$(cat "$HG_DEC")"
+assert_eq "maintainer gate: the decision is 'approved'" "approved" "$(jq -r '.decision' "$HG_DEC")"
+assert_eq "maintainer gate: the authority is an explicit maintainer decision" \
+  "maintainer-decision" "$(jq -r '.source' "$HG_DEC")"
+assert_eq "maintainer gate: the record carries the exact run id" \
+  "$(fxo_state "$HG" get run_id)" "$(jq -r '.run_id' "$HG_DEC")"
+assert_eq "maintainer gate: the record carries the exact issue number" \
+  "40" "$(jq -r '.issue_number' "$HG_DEC")"
+assert_eq "maintainer gate: the record carries the recorded contract hash" \
+  "$HG_HASH_BEFORE" "$(jq -r '.contract_hash' "$HG_DEC")"
+assert_eq "maintainer gate: the record carries the reviewed fingerprint" \
+  "$HG_FP" "$(jq -r '.reviewed_fingerprint' "$HG_DEC")"
+assert_eq "maintainer gate: the record carries the VERIFY_WORKTREE identity" \
+  "PASS|$HG_FP" \
+  "$(jq -r '.verify_worktree_result + "|" + .verify_worktree_fingerprint' "$HG_DEC")"
+assert_eq "maintainer gate: the record carries the review verdict and counts" \
+  "PASS|0|0" \
+  "$(jq -r '.review_verdict + "|" + (.review_critical|tostring) + "|" + (.review_major|tostring)' "$HG_DEC")"
+assert_eq "maintainer gate: the decision record persists only deterministic fields" \
+  "contract_hash,decision,issue_number,recorded_at,review_critical,review_major,review_verdict,reviewed_fingerprint,run_id,schema_version,source,verify_worktree_fingerprint,verify_worktree_result" \
+  "$(jq -r '[keys[]] | join(",")' "$HG_DEC")"
+
+# --- the run's identity is untouched by the decision ---------------------
+assert_eq "immutability: the stored issue contract is byte-identical after approval" \
+  "$HG_CONTRACT_BEFORE" "$(cat "$HG_SD/issue-contract.md")"
+assert_eq "immutability: state.json.contract_hash is unchanged after approval" \
+  "$HG_HASH_BEFORE" "$(fxo_state "$HG" get contract_hash)"
+assert_eq "immutability: the contract parser still reports the gate as unresolved" \
+  "unresolved" "$(gate_status "$HG")"
+
+# --- a valid approval permits the existing RESOLVE_HUMAN_GATES -> STAGE ---
+run_capture fxo_orch "$HG" gates-resolved
+assert_eq "maintainer gate: gates-resolved succeeds after a valid approval" "0" "$RC"
+assert_eq "maintainer gate: -> STAGE" "STAGE" "$(fxo_phase "$HG")"
+assert_eq "maintainer gate: the event reports the maintainer approval" \
+  "maintainer-approved" "$(printf '%s' "$OUT" | jq -r '.human_gates')"
+assert_eq "evidence: the settlement record distinguishes a maintainer approval" \
+  "maintainer-approved" "$(jq -r '.status' "$HG_REC/human-gate.json")"
+assert_eq "evidence: the settlement record's authority is the maintainer decision" \
+  "maintainer-decision" "$(jq -r '.source' "$HG_REC/human-gate.json")"
+assert_eq "evidence: the settlement record is tied to the recorded contract" \
+  "$HG_HASH_BEFORE" "$(jq -r '.contract_hash' "$HG_REC/human-gate.json")"
+assert_eq "evidence: the settlement record is tied to this run and candidate" \
+  "$(fxo_state "$HG" get run_id)|40|$HG_FP" \
+  "$(jq -r '.run_id + "|" + (.issue_number|tostring) + "|" + .reviewed_fingerprint' "$HG_REC/human-gate.json")"
+assert_eq "evidence: the settlement record carries the decision timestamp" \
+  "$(jq -r '.recorded_at' "$HG_DEC")" "$(jq -r '.decided_at' "$HG_REC/human-gate.json")"
+assert_eq "immutability: the contract is still byte-identical after gates-resolved" \
+  "$HG_CONTRACT_BEFORE" "$(cat "$HG_SD/issue-contract.md")"
+assert_eq "immutability: contract_hash is still unchanged after gates-resolved" \
+  "$HG_HASH_BEFORE" "$(fxo_state "$HG" get contract_hash)"
+
+# --- the approved gate reaches deterministic PR evidence (Issue #28) ------
+fxo_orch "$HG" stage >/dev/null
+fxo_orch "$HG" verify-staged >/dev/null
+fxo_orch "$HG" commit >/dev/null
+fxo_orch "$HG" push >/dev/null
+: >"$FXO_GH_LOG"
+assert_ok "maintainer gate: create-pr after a maintainer-approved gate" fxo_orch "$HG" create-pr
+HG_BODY="$(cat "$HG_SD/pr-body.md")"
+assert_contains "pr evidence: the maintainer-approved gate is reported as such" \
+  "$HG_BODY" "| Human Gate resolution | maintainer-approved |"
+assert_contains "pr evidence: the PR body carries the unchanged contract hash" \
+  "$HG_BODY" "| Contract hash | $HG_HASH_BEFORE |"
+assert_contains "pr evidence: the PR body carries the reviewed fingerprint" \
+  "$HG_BODY" "| Reviewed candidate fingerprint | $HG_FP |"
+assert_eq "immutability: the contract survived the whole run unchanged" \
+  "$HG_CONTRACT_BEFORE" "$(cat "$HG_SD/issue-contract.md")"
+
+# --- no orchestration event can produce a decision record ----------------
+
+hg_boot 41 "Event grammar probe"
+for ev in status validate-contract begin-plan begin-implement verify-worktree \
+          begin-review review-pass review-changes-required review-reassess \
+          reassess-complete gates-resolved stage verify-staged commit push \
+          create-pr resume; do
+  fxo_orch "$HG" "$ev" >/dev/null 2>&1 || true
+done
+assert_file_absent "event grammar: no orchestration event created a decision record" "$HG_DEC"
+assert_file_absent "event grammar: no orchestration event settled the gate" "$HG_REC/human-gate.json"
+assert_ne "event grammar: STAGE was never reached" "STAGE" "$(fxo_phase "$HG")"
+assert_eq "event grammar: nothing was staged" "" "$(git -C "$HG" diff --cached --name-only)"
+
+# --- explicit rejection ---------------------------------------------------
+
+hg_boot 42 "Maintainer gate rejection probe"
+assert_ok "rejection: an explicit rejection is accepted" fxo_gate_reject "$HG"
+assert_eq "rejection: the decision is 'rejected'" "rejected" "$(jq -r '.decision' "$HG_DEC")"
+assert_eq "rejection: the rejection is bound to the run" \
+  "$(fxo_state "$HG" get run_id)" "$(jq -r '.run_id' "$HG_DEC")"
+
+run_capture fxo_orch "$HG" gates-resolved
+assert_ne "rejection: gates-resolved is refused" "0" "$RC"
+assert_eq "rejection: -> MANUAL_REVIEW_REQUIRED" "MANUAL_REVIEW_REQUIRED" "$(fxo_phase "$HG")"
+assert_eq "rejection: the blocker names the maintainer rejection" \
+  "HUMAN_GATE_REJECTED" "$(fxo_state "$HG" get blocker_code)"
+assert_eq "rejection: the blocker message is deterministic" \
+  "the maintainer rejected the Human Gate decision" "$(fxo_state "$HG" get blocker_message)"
+assert_eq "rejection: the resume phase is the gate decision point" \
+  "RESOLVE_HUMAN_GATES" "$(fxo_state "$HG" get resume_phase)"
+assert_fail_code "rejection: STAGE is unreachable" ORCHESTRATOR_PHASE_MISMATCH \
+  fxo_orch "$HG" stage
+assert_file_absent "rejection: no settlement evidence was written" "$HG_REC/human-gate.json"
+assert_eq "rejection: nothing was staged" "" "$(git -C "$HG" diff --cached --name-only)"
+
+# a rejection is not undone by resuming
+fxo_orch "$HG" resume >/dev/null
+run_capture fxo_orch "$HG" gates-resolved
+assert_eq "rejection: resuming does not clear the rejection" \
+  "MANUAL_REVIEW_REQUIRED" "$(fxo_phase "$HG")"
+
+# only another explicit maintainer decision changes it
+fxo_orch "$HG" resume >/dev/null
+assert_ok "rejection: the maintainer may explicitly approve afterwards" fxo_gate_approve "$HG"
+assert_ok "rejection: the replaced decision permits STAGE" fxo_orch "$HG" gates-resolved
+assert_eq "rejection: -> STAGE after the explicit approval" "STAGE" "$(fxo_phase "$HG")"
+
+# --- stale, cross-run and tampered decisions fail closed -----------------
+
+hg_boot 43 "Stale decision probe"
+fxo_gate_approve "$HG" >/dev/null
+cp "$HG_DEC" "$HG_DEC.bak"
+cp "$HG_REC/verify-worktree.json" "$HG_REC/verify-worktree.json.bak"
+cp "$HG_REC/review.json" "$HG_REC/review.json.bak"
+
+# hg_tamper NAME JQ_FILTER — rewrite one field of the decision record and prove
+# gates-resolved fails closed on it.
+hg_tamper() {
+  jq -c "$2" "$HG_DEC.bak" >"$HG_DEC"
+  hg_refuse "$1"
+  cp "$HG_DEC.bak" "$HG_DEC"
+}
+
+hg_tamper "stale: another run id" '.run_id = "00000000-0000-0000-0000-0000000000ff"'
+hg_tamper "stale: another issue number" '.issue_number = 999'
+hg_tamper "stale: another contract hash" '.contract_hash = "0000000000000000000000000000000000000000000000000000000000000fee"'
+hg_tamper "stale: another reviewed candidate" '.reviewed_fingerprint = "sha256:0000000000000000000000000000000000000000000000000000000000000bad"'
+hg_tamper "stale: a non-passing VERIFY_WORKTREE claim" '.verify_worktree_result = "FAIL"'
+hg_tamper "stale: a VERIFY_WORKTREE fingerprint for another candidate" '.verify_worktree_fingerprint = "sha256:0000000000000000000000000000000000000000000000000000000000000fad"'
+hg_tamper "stale: a non-passing review claim" '.review_verdict = "FAIL"'
+hg_tamper "stale: a claimed Critical finding" '.review_critical = 3'
+hg_tamper "stale: a claimed Major finding" '.review_major = 2'
+hg_tamper "forged: a non-maintainer authority" '.source = "orchestration-event"'
+hg_tamper "forged: an unsupported schema version" '.schema_version = 2'
+hg_tamper "forged: an unrecognised decision word" '.decision = "APPROVED"'
+hg_tamper "forged: a decision record with no decision" 'del(.decision)'
+
+# Issue #24 correction round 1 (MINOR-1): the decision record is an integrity
+# boundary, so its JSON TYPES are authoritative too. A field whose rendered text
+# would compare equal is still rejected when it is the wrong type.
+hg_tamper "typed: a stringified schema version" '.schema_version |= tostring'
+hg_tamper "typed: a stringified issue number" '.issue_number |= tostring'
+hg_tamper "typed: a stringified Critical count" '.review_critical |= tostring'
+hg_tamper "typed: a stringified Major count" '.review_major |= tostring'
+hg_tamper "typed: a null run id" '.run_id = null'
+hg_tamper "typed: an empty contract hash" '.contract_hash = ""'
+hg_tamper "typed: a missing decision timestamp" 'del(.recorded_at)'
+
+printf 'not json at all\n' >"$HG_DEC"
+hg_refuse "malformed: a decision record that is not JSON"
+cp "$HG_DEC.bak" "$HG_DEC"
+
+rm -f "$HG_DEC"
+hg_refuse "missing: no decision record at all"
+cp "$HG_DEC.bak" "$HG_DEC"
+
+# the approval is also re-checked against the LIVE evidence, so evidence that
+# changed after the decision fails closed too
+hg_live() {
+  jq -c "$3" "$2.bak" >"$2"
+  hg_refuse "$1"
+  cp "$2.bak" "$2"
+}
+hg_live "live: VERIFY_WORKTREE no longer passes" "$HG_REC/verify-worktree.json" '.result = "FAIL"'
+hg_live "live: the verified candidate changed" "$HG_REC/verify-worktree.json" \
+  '.candidate.fingerprint = "sha256:0000000000000000000000000000000000000000000000000000000000000fad"'
+hg_live "live: the review no longer clears Critical" "$HG_REC/review.json" '.critical = 1'
+hg_live "live: the review describes another candidate" "$HG_REC/review.json" \
+  '.reviewed_fingerprint = "sha256:0000000000000000000000000000000000000000000000000000000000000bad"'
+
+# Issue #24 correction round 1 (MAJOR-1): the live evidence must also PROVE it
+# belongs to this run and this issue. Each case below rewrites only provenance —
+# the candidate fingerprint, verdict and counts stay exactly as the untampered
+# approval bound them — so a refusal can only come from the provenance check.
+HG_WT_FP_BEFORE="$(jq -r '.candidate.fingerprint' "$HG_REC/verify-worktree.json")"
+HG_RV_FP_BEFORE="$(jq -r '.reviewed_fingerprint' "$HG_REC/review.json")"
+
+# hg_prov NAME FILE JQ_FILTER — like hg_live, but additionally asserts that the
+# candidate fingerprint the tampered record carries is unchanged.
+hg_prov() {
+  jq -c "$3" "$2.bak" >"$2"
+  assert_eq "$1: the candidate fingerprints are untouched" \
+    "$HG_WT_FP_BEFORE|$HG_RV_FP_BEFORE" \
+    "$(jq -r '.candidate.fingerprint' "$HG_REC/verify-worktree.json")|$(jq -r '.reviewed_fingerprint' "$HG_REC/review.json")"
+  hg_refuse "$1"
+  cp "$2.bak" "$2"
+}
+
+hg_prov "provenance: a PASS VERIFY_WORKTREE from another run" \
+  "$HG_REC/verify-worktree.json" '.run_id = "00000000-0000-0000-0000-0000000000ff"'
+hg_prov "provenance: a PASS VERIFY_WORKTREE for another issue" \
+  "$HG_REC/verify-worktree.json" '.issue_number = 999'
+hg_prov "provenance: accepted review evidence from another run" \
+  "$HG_REC/review.json" '.run_id = "00000000-0000-0000-0000-0000000000ff"'
+hg_prov "provenance: accepted review evidence for another issue" \
+  "$HG_REC/review.json" '.issue_number = 999'
+
+# missing or wrongly typed provenance is not "no opinion" — it fails closed
+hg_live "provenance: VERIFY_WORKTREE with no run id" "$HG_REC/verify-worktree.json" 'del(.run_id)'
+hg_live "provenance: VERIFY_WORKTREE with a null run id" "$HG_REC/verify-worktree.json" '.run_id = null'
+hg_live "provenance: VERIFY_WORKTREE with no issue number" "$HG_REC/verify-worktree.json" 'del(.issue_number)'
+hg_live "provenance: a stringified VERIFY_WORKTREE issue number" \
+  "$HG_REC/verify-worktree.json" '.issue_number |= tostring'
+hg_live "provenance: review evidence with no run id" "$HG_REC/review.json" 'del(.run_id)'
+hg_live "provenance: a stringified review issue number" "$HG_REC/review.json" '.issue_number |= tostring'
+
+rm -f "$HG_REC/verify-worktree.json"
+hg_refuse "live: the VERIFY_WORKTREE record is gone"
+cp "$HG_REC/verify-worktree.json.bak" "$HG_REC/verify-worktree.json"
+rm -f "$HG_REC/review.json"
+hg_refuse "live: the review record is gone"
+cp "$HG_REC/review.json.bak" "$HG_REC/review.json"
+
+# the restored, untampered set still reaches STAGE, so every refusal above was
+# caused by the tampering and nothing else
+assert_ok "stale: the restored decision still permits STAGE" fxo_orch "$HG" gates-resolved
+assert_eq "stale: -> STAGE" "STAGE" "$(fxo_phase "$HG")"
+
+# --- approval prerequisites are enforced where the decision is taken -----
+
+hg_boot 44 "Approval prerequisite probe"
+cp "$HG_REC/verify-worktree.json" "$HG_REC/verify-worktree.json.bak"
+cp "$HG_REC/review.json" "$HG_REC/review.json.bak"
+cp "$HG_SD/reviewed-manifest.json" "$HG_SD/reviewed-manifest.json.bak"
+
+# hg_pre NAME CODE FILE JQ_FILTER — a prerequisite violation refuses the approval
+hg_pre() {
+  jq -c "$4" "$3.bak" >"$3"
+  assert_fail_code "$1" "$2" fxo_gate_approve "$HG"
+  cp "$3.bak" "$3"
+}
+
+hg_pre "prerequisite: VERIFY_WORKTREE must pass" HUMAN_GATE_VERIFICATION_NOT_PASSING \
+  "$HG_REC/verify-worktree.json" '.result = "FAIL"'
+hg_pre "prerequisite: the verified candidate must be the reviewed candidate" \
+  HUMAN_GATE_EVIDENCE_STALE "$HG_REC/verify-worktree.json" \
+  '.candidate.fingerprint = "sha256:0000000000000000000000000000000000000000000000000000000000000fad"'
+hg_pre "prerequisite: the review must describe the reviewed candidate" \
+  HUMAN_GATE_EVIDENCE_STALE "$HG_REC/review.json" \
+  '.reviewed_fingerprint = "sha256:0000000000000000000000000000000000000000000000000000000000000bad"'
+hg_pre "prerequisite: the review verdict must be PASS" HUMAN_GATE_REVIEW_NOT_ACCEPTED \
+  "$HG_REC/review.json" '.verdict = "FAIL"'
+hg_pre "prerequisite: Critical must be 0" HUMAN_GATE_REVIEW_NOT_ACCEPTED \
+  "$HG_REC/review.json" '.critical = 2'
+hg_pre "prerequisite: Major must be 0" HUMAN_GATE_REVIEW_NOT_ACCEPTED \
+  "$HG_REC/review.json" '.major = 1'
+
+# Issue #24 correction round 1 (MAJOR-1): the maintainer entry point refuses the
+# approval for the same provenance reasons, with a code that says so. Only the
+# run/issue fields are rewritten; fingerprints, verdict and counts stay valid.
+hg_pre "provenance: VERIFY_WORKTREE must belong to this run" HUMAN_GATE_EVIDENCE_STALE \
+  "$HG_REC/verify-worktree.json" '.run_id = "00000000-0000-0000-0000-0000000000ff"'
+hg_pre "provenance: VERIFY_WORKTREE must belong to this issue" HUMAN_GATE_EVIDENCE_STALE \
+  "$HG_REC/verify-worktree.json" '.issue_number = 999'
+hg_pre "provenance: the review must belong to this run" HUMAN_GATE_EVIDENCE_STALE \
+  "$HG_REC/review.json" '.run_id = "00000000-0000-0000-0000-0000000000ff"'
+hg_pre "provenance: the review must belong to this issue" HUMAN_GATE_EVIDENCE_STALE \
+  "$HG_REC/review.json" '.issue_number = 999'
+hg_pre "provenance: absent VERIFY_WORKTREE provenance fails closed" HUMAN_GATE_EVIDENCE_MISSING \
+  "$HG_REC/verify-worktree.json" 'del(.run_id)'
+hg_pre "provenance: absent review provenance fails closed" HUMAN_GATE_EVIDENCE_MISSING \
+  "$HG_REC/review.json" 'del(.issue_number)'
+hg_pre "provenance: a stringified issue number is not the issue number" HUMAN_GATE_EVIDENCE_MISSING \
+  "$HG_REC/review.json" '.issue_number |= tostring'
+
+for missing in "$HG_REC/verify-worktree.json" "$HG_REC/review.json" "$HG_SD/reviewed-manifest.json"; do
+  mv "$missing" "$missing.hidden"
+  assert_fail_code "prerequisite: missing evidence refuses the approval ($(basename "$missing"))" \
+    HUMAN_GATE_EVIDENCE_MISSING fxo_gate_approve "$HG"
+  mv "$missing.hidden" "$missing"
+done
+assert_file_absent "prerequisite: no refused approval wrote a decision record" "$HG_DEC"
+
+# a decision taken against a drifted contract is refused
+cp "$HG_SD/issue-contract.md" "$HG_SD/issue-contract.bak"
+printf '\ndrifted\n' >>"$HG_SD/issue-contract.md"
+assert_fail_code "prerequisite: a drifted contract refuses the approval" \
+  HUMAN_GATE_CONTRACT_HASH_MISMATCH fxo_gate_approve "$HG"
+cp "$HG_SD/issue-contract.bak" "$HG_SD/issue-contract.md"
+assert_ok "prerequisite: the restored contract permits the approval" fxo_gate_approve "$HG"
+
+# --- the decision is bound to the decision point and to a pending gate ---
+
+boot 45 "Decision point probe"
+DP="$BOOT_WT"
+fxo_set_verify PASS
+regate "$DP" gates-unresolved
+assert_fail_code "decision point: FETCH_ISSUE is not the gate decision point" \
+  HUMAN_GATE_PHASE_MISMATCH fxo_gate "-unset-" maintainer "$DP" approve
+fxo_orch "$DP" validate-contract >/dev/null
+fxo_orch "$DP" begin-plan >/dev/null
+fxo_orch "$DP" begin-implement >/dev/null
+fxo_candidate "$DP"
+fxo_orch "$DP" verify-worktree >/dev/null
+fxo_orch "$DP" begin-review >/dev/null
+assert_fail_code "decision point: REVIEW is not the gate decision point" \
+  HUMAN_GATE_PHASE_MISMATCH fxo_gate "-unset-" maintainer "$DP" approve
+assert_file_absent "decision point: no premature decision record exists" "$(fxo_decision_path "$DP")"
+fxo_orch "$DP" review-pass >/dev/null
+assert_ok "decision point: RESOLVE_HUMAN_GATES accepts the decision" \
+  fxo_gate "-unset-" maintainer "$DP" approve
+
+boot 46 "No pending gate probe"
+NP="$BOOT_WT"
+fxo_set_verify PASS
+fxo_drive_to_review "$NP"
+fxo_orch "$NP" review-pass >/dev/null
+assert_fail_code "decision point: a contract declaring no gate has nothing to decide" \
+  HUMAN_GATE_NOT_PENDING fxo_gate "-unset-" maintainer "$NP" approve
+assert_file_absent "decision point: no decision record for a gateless contract" \
+  "$(fxo_decision_path "$NP")"
+assert_ok "decision point: the gateless happy path is unchanged" fxo_orch "$NP" gates-resolved
+assert_eq "decision point: -> STAGE" "STAGE" "$(fxo_phase "$NP")"
+assert_eq "decision point: the settlement record still reports 'none'" \
+  "none" "$(jq -r '.status' "$(fxo_state_dir "$NP")/records/human-gate.json")"
 
 # ========================================================================
 # 6b. PR evidence fails closed through the controller (Issue #28)

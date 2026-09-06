@@ -23,7 +23,13 @@
 #   orchestrator.sh gates-resolved             RESOLVE_HUMAN_GATES -> STAGE
 #                                              (the ONLY Human Gate settlement
 #                                               check; validate-contract checks
-#                                               gate structure only)
+#                                               gate structure only. A gate the
+#                                               immutable contract still declares
+#                                               `unresolved` needs an explicit
+#                                               maintainer decision record, which
+#                                               only .claude/scripts/human-gate.sh
+#                                               can write and no event here can
+#                                               produce.)
 #   orchestrator.sh stage                      STAGE            (lifecycle: stage)
 #   orchestrator.sh verify-staged              STAGE            -> VERIFY_STAGED
 #   orchestrator.sh commit                     VERIFY_STAGED    -> COMMIT   (lifecycle)
@@ -118,17 +124,6 @@ require_valid_contract() {
     orch_enter_offramp "$REPO" CONTRACT_HASH_MISMATCH
 }
 
-# Human Gate SETTLEMENT — required only at RESOLVE_HUMAN_GATES, the phase
-# immediately before STAGE. A gate that is still open there is a maintainer
-# decision, never a model one, so it off-ramps to HUMAN_DECISION_REQUIRED.
-require_gates_settled() {
-  local st; st="$(contract_gate_status)"
-  case "$st" in
-    none | resolved) : ;;
-    *) orch_enter_offramp "$REPO" HUMAN_GATE_UNRESOLVED ;;
-  esac
-}
-
 # Human Gate STRUCTURE — all that initial contract validation may demand
 # (Issue #24). `none`, `resolved` and a well-formed `unresolved` are equally
 # valid this early: a gate that is deliberately scheduled for the pre-staging
@@ -143,6 +138,110 @@ require_gates_well_formed() {
     none | resolved | unresolved) : ;;
     *) orch_enter_offramp "$REPO" CONTRACT_INVALID ;;
   esac
+}
+
+# --------------------------------------------------------------------------
+# Maintainer Human Gate approval (Issue #24, reopened scope)
+#
+# A gate the immutable stored contract still declares `unresolved` is settled ONLY
+# by a decision record written by .claude/scripts/human-gate.sh — an entry point
+# no Claude session can reach (it is on no Bash allowlist) and whose authority
+# comes from a maintainer-set environment marker outside the orchestrated run.
+# There is deliberately no orchestration event that writes, edits or overrides
+# that record: the controller can only READ it, and only fail closed.
+#
+# Every binding is re-checked here, so a record cannot become valid merely
+# because the workflow later reached this phase.
+# --------------------------------------------------------------------------
+
+# gate_bind FILE FILTER EXPECTED — a decision field must be present and exactly
+# equal to the value the run itself recorded. Anything else is not an approval of
+# THIS run and fails closed.
+gate_bind() {
+  local rec="$1" filter="$2" want="$3" got
+  got="$(orch_record_field "$rec" "$filter")" || got=""
+  { [ -n "$want" ] && [ "$got" = "$want" ]; } ||
+    orch_enter_offramp "$REPO" HUMAN_GATE_UNRESOLVED
+}
+
+# The decision record is an integrity boundary, so its shape is checked before
+# any field of it is believed — a rendered value of the right text but the wrong
+# JSON type is not the value (Issue #24 correction round 1, MINOR-1). The base
+# fields are what EVERY decision must carry; the evidence-binding fields exist
+# only on an approval, so they are validated separately on that path.
+gate_decision_base_ok() {
+  jq -e '(.schema_version | type == "number" and . == floor)
+         and (.source        | type == "string" and length > 0)
+         and (.decision      | type == "string" and length > 0)
+         and (.run_id        | type == "string" and length > 0)
+         and (.issue_number  | type == "number" and . == floor and . >= 0)
+         and (.contract_hash | type == "string" and length > 0)
+         and (.recorded_at   | type == "string" and length > 0)' \
+     "$1" >/dev/null 2>&1
+}
+
+gate_decision_approval_ok() {
+  jq -e '(.reviewed_fingerprint         | type == "string" and length > 0)
+         and (.verify_worktree_result      | type == "string" and length > 0)
+         and (.verify_worktree_fingerprint | type == "string" and length > 0)
+         and (.review_verdict              | type == "string" and length > 0)
+         and (.review_critical             | type == "number" and . == floor and . >= 0)
+         and (.review_major                | type == "number" and . == floor and . >= 0)' \
+     "$1" >/dev/null 2>&1
+}
+
+GATE_DECIDED_AT=""
+require_maintainer_approval() {
+  local contract_hash="$1" rec dec ev run issue
+  local fp wt_res wt_fp wt_run wt_issue verdict crit major rfp rv_run rv_issue
+  rec="$(orch_record_path "$REPO" "$ORCH_HUMAN_GATE_DECISION_NAME")"
+
+  # No record, an unreadable record, a structurally untrustworthy one, or
+  # anything that is not a recognised decision leaves the gate exactly as the
+  # contract describes it: unresolved.
+  [ -f "$rec" ] && gate_decision_base_ok "$rec" ||
+    orch_enter_offramp "$REPO" HUMAN_GATE_UNRESOLVED
+  dec="$(orch_record_field "$rec" '.decision')" ||
+    orch_enter_offramp "$REPO" HUMAN_GATE_UNRESOLVED
+  case "$dec" in
+    approved) : ;;
+    rejected) orch_enter_offramp "$REPO" HUMAN_GATE_REJECTED ;;
+    *)        orch_enter_offramp "$REPO" HUMAN_GATE_UNRESOLVED ;;
+  esac
+  gate_decision_approval_ok "$rec" ||
+    orch_enter_offramp "$REPO" HUMAN_GATE_UNRESOLVED
+
+  # The live evidence the approval claims to be about must still exist, must
+  # belong to THIS run and issue, and must still say the same thing. Provenance
+  # is checked first: evidence from another run is not this run's evidence, no
+  # matter how well its fingerprint, verdict and counts line up.
+  ev="$(orch_gate_evidence "$REPO")" ||
+    orch_enter_offramp "$REPO" HUMAN_GATE_UNRESOLVED
+  IFS=$'\t' read -r fp wt_res wt_fp wt_run wt_issue \
+                    verdict crit major rfp rv_run rv_issue <<<"$ev"
+  run="$(orch_field "$REPO" run_id)"
+  issue="$(orch_field "$REPO" issue_number)"
+  { [ "$wt_run" = "$run" ] && [ "$wt_issue" = "$issue" ] &&
+    [ "$rv_run" = "$run" ] && [ "$rv_issue" = "$issue" ]; } ||
+    orch_enter_offramp "$REPO" HUMAN_GATE_UNRESOLVED
+  { [ "$wt_res" = PASS ] && [ "$wt_fp" = "$fp" ] && [ "$rfp" = "$fp" ] &&
+    [ "$verdict" = PASS ] && [ "$crit" = 0 ] && [ "$major" = 0 ]; } ||
+    orch_enter_offramp "$REPO" HUMAN_GATE_UNRESOLVED
+
+  gate_bind "$rec" '.schema_version'              "$ORCH_HUMAN_GATE_DECISION_SCHEMA"
+  gate_bind "$rec" '.source'                      "$ORCH_MAINTAINER_DECISION_SOURCE"
+  gate_bind "$rec" '.run_id'                      "$run"
+  gate_bind "$rec" '.issue_number'                "$issue"
+  gate_bind "$rec" '.contract_hash'               "$contract_hash"
+  gate_bind "$rec" '.reviewed_fingerprint'        "$fp"
+  gate_bind "$rec" '.verify_worktree_result'      PASS
+  gate_bind "$rec" '.verify_worktree_fingerprint' "$fp"
+  gate_bind "$rec" '.review_verdict'              PASS
+  gate_bind "$rec" '.review_critical'             0
+  gate_bind "$rec" '.review_major'                0
+
+  GATE_DECIDED_AT="$(orch_record_field "$rec" '.recorded_at')" ||
+    orch_enter_offramp "$REPO" HUMAN_GATE_UNRESOLVED
 }
 
 # --------------------------------------------------------------------------
@@ -277,12 +376,21 @@ ev_review_pass() {
   # a stored record can only exist for a review that cleared both blocking
   # severities, and the closed fields below are the whole record — no free-form
   # model text is ever persisted or rendered anywhere downstream.
+  #
+  # The record also carries its own provenance — the run and issue it was
+  # produced for (Issue #24 correction round 1). Without it, evidence copied in
+  # from another run would be indistinguishable from this run's own, and the
+  # maintainer approval that binds to it could be satisfied by a stale record
+  # whose fingerprint and counts merely happen to match.
   orch_write_record "$REPO" "$ORCH_REVIEW_RECORD_NAME" "$(jq -cn \
     --arg fp "$fp" --arg at "$(now_utc)" \
+    --arg run "$(orch_field "$REPO" run_id)" \
+    --argjson issue "$(orch_field "$REPO" issue_number)" \
     --argjson attempts "$(orch_field "$REPO" review_attempts)" \
     --argjson rounds "$(orch_field "$REPO" review_correction_rounds)" \
     '{schema_version:1, source:"orchestration-event", event:"review-pass",
       verdict:"PASS", critical:0, major:0,
+      run_id:$run, issue_number:$issue,
       review_attempts:$attempts, review_correction_rounds:$rounds,
       reviewed_fingerprint:$fp, recorded_at:$at}')" ||
     fail ORCHESTRATOR_REVIEW_RECORD_FAILED "could not persist the independent review evidence"
@@ -324,27 +432,59 @@ ev_reassess_complete() {
 
 ev_gates_resolved() {
   orch_require_phase "$REPO" RESOLVE_HUMAN_GATES >/dev/null
-  require_gates_settled
-  [ -f "$(orch_reviewed_manifest_path "$REPO")" ] ||
+  local mf; mf="$(orch_reviewed_manifest_path "$REPO")"
+  [ -f "$mf" ] ||
     fail ORCHESTRATOR_REVIEWED_MANIFEST_MISSING "no reviewed candidate manifest was captured"
 
-  # Explicit Human Gate settlement evidence (Issue #28): the deterministic
-  # parser's verdict on the STORED contract, together with the hash of the exact
-  # contract it was read from. Downstream evidence therefore never has to infer
-  # "resolved" from the fact that a later phase was reached.
-  local gate_status contract_hash
-  gate_status="$(contract_gate_status)"
+  # The contract this event reads must still be the run's initialised identity.
+  # Human Gate settlement never edits it, so a drift here is a defect, not a
+  # decision.
+  local contract_hash
   contract_hash="$(bash "$ORCH_CONTRACT_SH" hash "$(contract_file)" 2>/dev/null)" || contract_hash=""
   [ -n "$contract_hash" ] ||
     fail ORCHESTRATOR_GATE_RECORD_FAILED "could not hash the stored issue contract for the Human Gate record"
+  [ "$contract_hash" = "$(orch_field "$REPO" contract_hash)" ] ||
+    orch_enter_offramp "$REPO" CONTRACT_HASH_MISMATCH
+
+  # Explicit Human Gate settlement evidence (Issue #28), extended for the
+  # maintainer decision path (Issue #24, reopened scope). Downstream evidence
+  # never has to infer "settled" from the fact that a later phase was reached,
+  # and it can tell a contract that declared no gate apart from a gate an
+  # explicit maintainer approval settled.
+  local gate_status source status extra='{}'
+  gate_status="$(contract_gate_status)"
+  case "$gate_status" in
+    none | resolved)
+      source="issue-contract-parser"
+      status="$gate_status"
+      ;;
+    unresolved)
+      # Off-ramps unless an explicit maintainer approval decision record exists
+      # and binds to this run's exact evidence. The model has no event that can
+      # produce that record.
+      require_maintainer_approval "$contract_hash"
+      source="$ORCH_MAINTAINER_DECISION_SOURCE"
+      status="$ORCH_MAINTAINER_APPROVED_STATUS"
+      extra="$(jq -cn --arg at "$GATE_DECIDED_AT" '{decided_at:$at}')"
+      ;;
+    *)
+      orch_enter_offramp "$REPO" HUMAN_GATE_UNRESOLVED
+      ;;
+  esac
+
   orch_write_record "$REPO" "$ORCH_HUMAN_GATE_RECORD_NAME" "$(jq -cn \
-    --arg s "$gate_status" --arg h "$contract_hash" --arg at "$(now_utc)" \
-    '{schema_version:1, source:"issue-contract-parser", event:"gates-resolved",
-      status:$s, contract_hash:$h, recorded_at:$at}')" ||
+    --arg s "$status" --arg src "$source" --arg h "$contract_hash" \
+    --arg run "$(orch_field "$REPO" run_id)" \
+    --argjson issue "$(orch_field "$REPO" issue_number)" \
+    --arg fp "$(jq -r '.fingerprint' "$mf")" \
+    --arg at "$(now_utc)" --argjson extra "$extra" \
+    '{schema_version:1, source:$src, event:"gates-resolved",
+      status:$s, contract_hash:$h, run_id:$run, issue_number:$issue,
+      reviewed_fingerprint:$fp, recorded_at:$at} + $extra')" ||
     fail ORCHESTRATOR_GATE_RECORD_FAILED "could not persist the Human Gate settlement evidence"
 
   transition STAGE
-  emit gates-resolved OK "$(jq -cn --arg s "$gate_status" '{human_gates:$s}')"
+  emit gates-resolved OK "$(jq -cn --arg s "$status" '{human_gates:$s}')"
 }
 
 ev_stage() {

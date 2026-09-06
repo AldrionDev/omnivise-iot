@@ -37,6 +37,9 @@ ORCH_CANDIDATE_SH="${ORCH_CANDIDATE_SH:-$ORCH_SCRIPTS_DIR/candidate.sh}"
 ORCH_CONTRACT_SH="${ORCH_CONTRACT_SH:-$ORCH_SCRIPTS_DIR/issue-contract.sh}"
 ORCH_VERIFY_SH="${ORCH_VERIFY_SH:-$ORCH_SCRIPTS_DIR/verify.sh}"
 ORCH_LIFECYCLE_SH="${ORCH_LIFECYCLE_SH:-$ORCH_SCRIPTS_DIR/lifecycle.sh}"
+# There is deliberately NO indirection to human-gate.sh here: no part of the
+# deterministic control plane may invoke the maintainer decision entry point.
+# The controller only ever READS the record human-gate.sh wrote.
 
 # Fixed evidence file names inside the worktree-local workflow-state directory
 # (<absolute-git-dir>/claude-omnivise). Workflow evidence NEVER becomes a
@@ -48,7 +51,17 @@ readonly ORCH_WORKTREE_RECORD_NAME="verify-worktree.json"
 readonly ORCH_STAGED_RECORD_NAME="verify-staged.json"
 readonly ORCH_REVIEW_RECORD_NAME="review.json"
 readonly ORCH_HUMAN_GATE_RECORD_NAME="human-gate.json"
+readonly ORCH_HUMAN_GATE_DECISION_NAME="human-gate-decision.json"
 readonly ORCH_PR_BODY_NAME="pr-body.md"
+
+# The maintainer Human Gate decision record (Issue #24, reopened scope). It is
+# written ONLY by human-gate.sh, which is unreachable from a Claude session, and
+# it is the only thing that can settle a Human Gate the immutable stored issue
+# contract still declares `unresolved`. The contract itself and the recorded
+# contract_hash stay byte-identical for the whole run.
+readonly ORCH_HUMAN_GATE_DECISION_SCHEMA=1
+readonly ORCH_MAINTAINER_DECISION_SOURCE="maintainer-decision"
+readonly ORCH_MAINTAINER_APPROVED_STATUS="maintainer-approved"
 
 # Deterministic worktree layout: a sibling of the primary checkout.
 readonly ORCH_WORKTREE_DIR_NAME="omnivise-iot-worktrees"
@@ -113,6 +126,68 @@ orch_record_field() {
   case "$v" in "" | null) return 1 ;; esac
   printf '%s' "$v"
   return 0
+}
+
+# orch_record_provenance_ok FILE — a workflow evidence record must say which run
+# and which issue produced it, in the right JSON types. `run_id` must be a
+# non-empty string and `issue_number` a non-negative integer NUMBER, so a record
+# carrying the string "40" is not interchangeable with the number 40. A record
+# whose provenance is absent, null or the wrong type fails closed here; nothing
+# is ever inferred or defaulted.
+orch_record_provenance_ok() {
+  jq -e '(.run_id       | type == "string" and length > 0)
+         and (.issue_number | type == "number" and . == floor and . >= 0)' \
+     "$1" >/dev/null 2>&1
+}
+
+# orch_gate_evidence REPO — the persisted evidence a Human Gate decision must be
+# bound to. Prints eleven TAB-separated fields:
+#
+#   reviewed_fingerprint
+#   verify_worktree_result  verify_worktree_fingerprint
+#   verify_worktree_run_id  verify_worktree_issue_number
+#   review_verdict  review_critical  review_major  review_fingerprint
+#   review_run_id   review_issue_number
+#
+# Provenance (Issue #24 correction round 1) is extracted, not judged: a caller
+# must still prove that both records describe the CURRENT run and issue. What is
+# enforced here is that the records are structurally trustworthy at all — every
+# required field present, non-null and of the right JSON type.
+#
+# Returns non-zero (printing nothing) when any required record is absent or a
+# required field is missing or malformed. Nothing is ever defaulted, and no
+# comparison is made here: the caller decides what a mismatch means.
+orch_gate_evidence() {
+  local repo="$1" mf wt rv fp
+  local wt_res wt_fp wt_run wt_issue
+  local verdict crit major rfp rv_run rv_issue
+
+  mf="$(orch_reviewed_manifest_path "$repo")"
+  fp="$(orch_record_field "$mf" '.fingerprint')" || return 1
+
+  wt="$(orch_record_path "$repo" "$ORCH_WORKTREE_RECORD_NAME")"
+  orch_record_provenance_ok "$wt" || return 1
+  wt_res="$(orch_record_field "$wt" '.result')" || return 1
+  wt_fp="$(orch_record_field "$wt" '.candidate.fingerprint')" || return 1
+  wt_run="$(orch_record_field "$wt" '.run_id')" || return 1
+  wt_issue="$(orch_record_field "$wt" '.issue_number')" || return 1
+
+  rv="$(orch_record_path "$repo" "$ORCH_REVIEW_RECORD_NAME")"
+  orch_record_provenance_ok "$rv" || return 1
+  jq -e '(.verdict | type == "string")
+         and (.critical | type == "number" and . == floor and . >= 0)
+         and (.major    | type == "number" and . == floor and . >= 0)' \
+     "$rv" >/dev/null 2>&1 || return 1
+  verdict="$(orch_record_field "$rv" '.verdict')" || return 1
+  crit="$(jq -r '.critical' "$rv" 2>/dev/null)" || return 1
+  major="$(jq -r '.major' "$rv" 2>/dev/null)" || return 1
+  rfp="$(orch_record_field "$rv" '.reviewed_fingerprint')" || return 1
+  rv_run="$(orch_record_field "$rv" '.run_id')" || return 1
+  rv_issue="$(orch_record_field "$rv" '.issue_number')" || return 1
+
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+    "$fp" "$wt_res" "$wt_fp" "$wt_run" "$wt_issue" \
+    "$verdict" "$crit" "$major" "$rfp" "$rv_run" "$rv_issue"
 }
 
 # orch_require_state REPO — the state document must exist and validate.
@@ -244,6 +319,8 @@ orch_blocker_phase() {
       printf 'CONTRACT_CLARIFICATION_REQUIRED' ;;
     HUMAN_GATE_UNRESOLVED)
       printf 'HUMAN_DECISION_REQUIRED' ;;
+    HUMAN_GATE_REJECTED)
+      printf 'MANUAL_REVIEW_REQUIRED' ;;
     ENVIRONMENT_FAILURE | TOOLING_UNAVAILABLE)
       printf 'WAITING_ENVIRONMENT' ;;
     REVIEW_CORRECTION_BUDGET_EXHAUSTED | IMPL_REPAIR_BUDGET_EXHAUSTED | \
@@ -279,6 +356,7 @@ orch_blocker_message() {
     CONTRACT_HASH_MISMATCH) printf 'the stored issue contract no longer matches the recorded contract hash' ;;
     CONTRACT_AMBIGUOUS)    printf 'the issue contract is ambiguous and needs maintainer clarification' ;;
     HUMAN_GATE_UNRESOLVED) printf 'the issue contract carries an unresolved Human Gate' ;;
+    HUMAN_GATE_REJECTED)   printf 'the maintainer rejected the Human Gate decision' ;;
     ENVIRONMENT_FAILURE)   printf 'deterministic verification reported an environment failure' ;;
     TOOLING_UNAVAILABLE)   printf 'a required verification tool is unavailable in this environment' ;;
     VERIFICATION_INDETERMINATE) printf 'deterministic verification could not establish a result' ;;
