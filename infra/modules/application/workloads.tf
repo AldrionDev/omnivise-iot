@@ -13,6 +13,11 @@ locals {
   sensor_interval   = "5"               # 5 s == 5000 ms; preserves the Docker Compose simulation interval contract
   mongodb_wait_host = "mongodb:27017"   # cluster-internal MongoDB Service, short name keeps the module environment-neutral
 
+  # FQDN backend authority for the frontend Nginx runtime name lookup; namespace
+  # comes from the module input so the module stays environment-neutral. This is
+  # an upstream host:port target, not a DNS-server address.
+  frontend_backend_upstream = "backend.${local.app_namespace}.svc.cluster.local:${local.backend_port}"
+
   common_labels = {
     "app.kubernetes.io/part-of"    = "omnivise-iot"
     "app.kubernetes.io/managed-by" = "terraform"
@@ -208,13 +213,21 @@ resource "kubernetes_deployment_v1" "frontend" {
       }
 
       spec {
-        # No init_container. No env block at all. No resolver/DNS config: the #37
-        # Nginx image entrypoint discovers the resolver at runtime
-        # (NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1 baked into frontend/Dockerfile);
-        # nginx.conf hardcodes `listen 80`.
+        # No init_container. The frontend container now carries exactly one env
+        # var, BACKEND_UPSTREAM, set to the backend Service FQDN so Nginx's
+        # runtime name lookup (using the DNS server discovered by the #37 image
+        # entrypoint's local-DNS discovery, enabled in frontend/Dockerfile) can
+        # resolve it deterministically in-cluster. Still NO DNS-server IP and NO
+        # CoreDNS address set here; DNS server discovery is still the image
+        # entrypoint's job. nginx.conf hardcodes `listen 80`.
         container {
           name  = "frontend"
           image = var.frontend_image_ref
+
+          env {
+            name  = "BACKEND_UPSTREAM"
+            value = local.frontend_backend_upstream
+          }
 
           port {
             name           = "http"
