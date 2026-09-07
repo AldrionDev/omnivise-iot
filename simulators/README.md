@@ -42,7 +42,7 @@ Continuously generates random IoT sensor data and writes it to MongoDB.
    ```bash
    docker run --rm \
      --network omnivise-iot_omnivise-network \
-     -e MONGO_URI=mongodb://admin:admin123@mongodb:27017 \
+     -e 'MONGO_URI=mongodb://mongodb:27017/?replicaSet=rs0' \
      -e MONGO_DATABASE=omnivise_iot \
      -e INTERVAL_SECONDS=5 \
      omnivise-sensor-simulator
@@ -60,7 +60,7 @@ docker-compose up -d sensor-simulator
 
 | Variable           | Default                                    | Description                    |
 | ------------------ | ------------------------------------------ | ------------------------------ |
-| `MONGO_URI`        | `mongodb://admin:admin123@localhost:27017` | MongoDB connection string      |
+| `MONGO_URI`        | `mongodb://localhost:27017/?replicaSet=rs0` | MongoDB connection string      |
 | `MONGO_DATABASE`   | `omnivise_iot`                             | Database name                  |
 | `MONGO_COLLECTION` | `sensor_readings`                          | Collection name                |
 | `INTERVAL_SECONDS` | `5`                                        | Generation interval in seconds |
@@ -110,7 +110,7 @@ INTERVAL_SECONDS=1 java -jar target/sensor-data-simulator-1.0.0.jar
 ### Using a different MongoDB server
 
 ```bash
-MONGO_URI=mongodb://user:pass@remote-server:27017 \
+MONGO_URI='mongodb://remote-server:27017/?replicaSet=rs0' \
 java -jar target/sensor-data-simulator-1.0.0.jar
 ```
 
@@ -125,7 +125,7 @@ Check the data in **Mongo Express**:
 Or with **MongoDB shell**:
 
 ```bash
-docker exec -it omnivise-mongodb mongosh -u admin -p admin123
+docker exec -it omnivise-mongodb mongosh
 
 use omnivise_iot
 db.sensor_readings.find().sort({timestamp: -1}).limit(10)

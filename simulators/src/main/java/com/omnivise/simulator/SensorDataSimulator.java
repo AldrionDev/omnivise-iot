@@ -22,7 +22,7 @@ public class SensorDataSimulator {
 
     // Default values for environment variables
     private static final String MONGO_URI = System.getenv().getOrDefault(
-            "MONGO_URI", "mongodb://admin:admin123@localhost:27017");
+            "MONGO_URI", "mongodb://localhost:27017/?replicaSet=rs0");
     private static final String DATABASE_NAME = System.getenv().getOrDefault(
             "MONGO_DATABASE", "omnivise_iot");
     private static final String COLLECTION_NAME = System.getenv().getOrDefault(

@@ -31,7 +31,7 @@ RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 USER appuser
 
 # Default environment variables
-ENV MONGO_URI=mongodb://admin:admin123@mongodb:27017
+ENV MONGO_URI=mongodb://mongodb:27017/?replicaSet=rs0
 ENV MONGO_DATABASE=omnivise_iot
 ENV MONGO_COLLECTION=sensor_readings
 ENV INTERVAL_SECONDS=5
