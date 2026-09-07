@@ -46,3 +46,6 @@ desktop.ini
 .terraform/
 *.tfstate
 *.tfstate.backup
+*.tfstate.*
+tfplan
+*.tfplan
