@@ -18,9 +18,13 @@ import { describe, expect, it } from 'vitest'
 
 const nginxConfPath = fileURLToPath(new URL('../nginx.conf', import.meta.url))
 const dockerfilePath = fileURLToPath(new URL('../Dockerfile', import.meta.url))
+const workloadsTfPath = fileURLToPath(
+  new URL('../../infra/modules/application/workloads.tf', import.meta.url),
+)
 
 const nginxConf = readFileSync(nginxConfPath, 'utf-8')
 const dockerfile = readFileSync(dockerfilePath, 'utf-8')
+const workloadsTf = readFileSync(workloadsTfPath, 'utf-8')
 
 function extractLocationBlock(text, locationPath) {
   const startMarker = `location ${locationPath} {`
@@ -55,6 +59,7 @@ describe('nginx.conf DNS resolver contract', () => {
       '$remote_addr',
       '$proxy_add_x_forwarded_for',
       '$scheme',
+      '$backend_upstream',
     ]
 
     for (const nativeVar of nativeVars) {
@@ -64,11 +69,37 @@ describe('nginx.conf DNS resolver contract', () => {
   })
 })
 
+describe('nginx.conf backend upstream contract', () => {
+  it('does not hardcode the backend upstream authority', () => {
+    expect(nginxConf).not.toContain('http://backend:8080')
+  })
+
+  it('does not pin a fixed resolver IP', () => {
+    expect(nginxConf).not.toMatch(/resolver\s+\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/)
+  })
+
+  it('does not bake Kubernetes identity into the image config', () => {
+    expect(nginxConf).not.toContain('omnivise-iot')
+    expect(nginxConf).not.toContain('svc.cluster.local')
+  })
+
+  it('preserves runtime DNS re-resolution on the resolver directive', () => {
+    expect(nginxConf).toMatch(/resolver\s+\$\{NGINX_LOCAL_RESOLVERS\}\s+valid=10s;/)
+  })
+
+  it('uses the same templated upstream in both proxy blocks', () => {
+    const apiBlock = extractLocationBlock(nginxConf, '/api/')
+    const wsBlock = extractLocationBlock(nginxConf, '/ws/')
+    expect(apiBlock).toContain('http://${BACKEND_UPSTREAM}')
+    expect(wsBlock).toContain('http://${BACKEND_UPSTREAM}')
+  })
+})
+
 describe('nginx.conf location /api/ block', () => {
   const apiBlock = extractLocationBlock(nginxConf, '/api/')
 
   it('proxies to the backend upstream', () => {
-    expect(apiBlock).toContain('set $backend_upstream http://backend:8080;')
+    expect(apiBlock).toContain('set $backend_upstream http://${BACKEND_UPSTREAM};')
     expect(apiBlock).toContain('proxy_pass $backend_upstream;')
   })
 })
@@ -77,7 +108,7 @@ describe('nginx.conf location /ws/ block', () => {
   const wsBlock = extractLocationBlock(nginxConf, '/ws/')
 
   it('proxies to the backend upstream', () => {
-    expect(wsBlock).toContain('set $backend_upstream http://backend:8080;')
+    expect(wsBlock).toContain('set $backend_upstream http://${BACKEND_UPSTREAM};')
     expect(wsBlock).toContain('proxy_pass $backend_upstream;')
   })
 
@@ -104,11 +135,35 @@ describe('Dockerfile Nginx template contract', () => {
     expect(dockerfile).toMatch(/ENV\s+NGINX_ENTRYPOINT_LOCAL_RESOLVERS=(1|true|"true"|'true')/i)
   })
 
-  it('restricts envsubst to the resolver variable so native Nginx variables survive', () => {
-    expect(dockerfile).toMatch(/ENV\s+NGINX_ENVSUBST_FILTER=\^NGINX_LOCAL_RESOLVERS\$/)
+  it('restricts envsubst to the resolver and backend upstream variables so native Nginx variables survive', () => {
+    expect(dockerfile).toMatch(/ENV\s+NGINX_ENVSUBST_FILTER=\^\(NGINX_LOCAL_RESOLVERS\|BACKEND_UPSTREAM\)\$/)
+  })
+
+  it('keeps the Docker Compose default backend upstream authority', () => {
+    expect(dockerfile).toMatch(/ENV\s+BACKEND_UPSTREAM=backend:8080/)
   })
 
   it('does not override the official image entrypoint', () => {
     expect(dockerfile).not.toMatch(/^\s*ENTRYPOINT\b/m)
+  })
+})
+
+describe('Terraform frontend workload backend upstream wiring', () => {
+  it('injects the backend upstream env var into the frontend container', () => {
+    expect(workloadsTf).toMatch(/name\s*=\s*"BACKEND_UPSTREAM"/)
+  })
+
+  it('builds a namespaced FQDN from the module input, not a literal namespace or IP', () => {
+    expect(workloadsTf).toMatch(
+      /backend\.\$\{local\.app_namespace\}\.svc\.cluster\.local:\$\{local\.backend_port\}/,
+    )
+  })
+
+  it('does not inject any resolver / DNS-server config from Terraform', () => {
+    expect(workloadsTf).not.toMatch(/resolver/i)
+  })
+
+  it('contains no dotted-quad IP literal', () => {
+    expect(workloadsTf).not.toMatch(/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/)
   })
 })
