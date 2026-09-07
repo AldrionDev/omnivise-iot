@@ -19,21 +19,18 @@ public class Main {
         // Load the .env file from the project root
         dotenv = loadDotenvFromProjectRoot();
 
-        // MongoDB connection string with authentication
-        // Use getEnvVar() which falls back to System.getenv() if dotenv is not
-        // available
+        String explicitMongoUri = getEnvVar("MONGO_URI", null);
         String mongoHost = getEnvVar("MONGO_HOST", "localhost");
         String mongoPort = getEnvVar("MONGO_PORT", "27017");
         String mongoUser = getEnvVar("MONGO_USER", null);
         String mongoPassword = getEnvVar("MONGO_PASSWORD", null);
 
-        String mongoUri;
-        if (mongoUser != null && mongoPassword != null && !mongoUser.isEmpty() && !mongoPassword.isEmpty()) {
-            mongoUri = String.format("mongodb://%s:%s@%s:%s/?directConnection=true",
-                    mongoUser, mongoPassword, mongoHost, mongoPort);
-        } else {
-            mongoUri = String.format("mongodb://%s:%s", mongoHost, mongoPort);
-        }
+        String mongoUri = resolveMongoUri(
+                explicitMongoUri,
+                mongoHost,
+                mongoPort,
+                mongoUser,
+                mongoPassword);
 
         String mongoDatabase = getEnvVar("MONGO_DATABASE", "omnivise_iot");
 
@@ -200,6 +197,35 @@ public class Main {
 
         // If still not found, use default value
         return (value != null && !value.isEmpty()) ? value : defaultValue;
+    }
+
+    /**
+     * Resolves the MongoDB connection URI.
+     *
+     * An explicit non-empty MONGO_URI is authoritative. When it is absent or
+     * empty, preserve the legacy host/port/user/password URI construction.
+     */
+    static String resolveMongoUri(
+            String explicitMongoUri,
+            String mongoHost,
+            String mongoPort,
+            String mongoUser,
+            String mongoPassword) {
+        if (explicitMongoUri != null && !explicitMongoUri.isEmpty()) {
+            return explicitMongoUri;
+        }
+
+        if (mongoUser != null && mongoPassword != null
+                && !mongoUser.isEmpty() && !mongoPassword.isEmpty()) {
+            return String.format(
+                    "mongodb://%s:%s@%s:%s/?directConnection=true",
+                    mongoUser,
+                    mongoPassword,
+                    mongoHost,
+                    mongoPort);
+        }
+
+        return String.format("mongodb://%s:%s", mongoHost, mongoPort);
     }
 
     /**
