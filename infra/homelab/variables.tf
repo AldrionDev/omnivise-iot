@@ -62,3 +62,30 @@ variable "kubernetes_context" {
     error_message = "kubernetes_context must not be empty."
   }
 }
+
+variable "ingress_host" {
+  type        = string
+  description = "Canonical homelab LAN hostname Traefik matches for OmniVise IoT. Plain HTTP; homelab DNS resolves it to the Traefik 'web' entrypoint. Not an application concern beyond routing."
+  default     = "omnivise-iot.homelab.home.arpa"
+
+  validation {
+    condition     = can(regex("^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$", var.ingress_host))
+    error_message = "ingress_host must be a syntactically valid lowercase DNS hostname: RFC 1123 labels (a-z, 0-9, hyphen; no leading/trailing hyphen), at least two dot-separated labels, no uppercase, no trailing dot."
+  }
+
+  validation {
+    condition     = length(var.ingress_host) <= 253
+    error_message = "ingress_host must not exceed 253 characters."
+  }
+}
+
+variable "traefik_entrypoint" {
+  type        = string
+  description = "Name of the Traefik static entrypoint that serves OmniVise IoT on the homelab LAN. Plain HTTP 'web' entrypoint only; no TLS, no websecure."
+  default     = "web"
+
+  validation {
+    condition     = can(regex("^[a-zA-Z0-9_-]+$", var.traefik_entrypoint))
+    error_message = "traefik_entrypoint must be a non-empty Traefik entrypoint name (letters, digits, hyphen, underscore)."
+  }
+}
