@@ -40,8 +40,8 @@ by the image entrypoint.
 
 Static tests cannot cover in-cluster DNS. After deploying to a cluster:
 
-- From the frontend Pod, verify `wget -qO- http://localhost/api/health` (or the
-  real health path) returns success.
+- From the frontend Pod, verify `wget -qO- http://localhost/api/sensors/latest`
+  (or the real health path) returns success.
 - Verify a `/ws/sensors` upgrade succeeds.
 - Run `nginx -T` in the Pod and confirm `proxy_pass` targets the FQDN authority
   and `resolver` is the Pod's CoreDNS ClusterIP, with no hardcoded IP in the
