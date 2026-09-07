@@ -149,6 +149,7 @@ mark_not_run() {
 }
 
 readonly REMAINING_IDS='tracked_whitespace untracked_whitespace docker_compose_config
+terraform_fmt terraform_init terraform_validate
 frontend_install frontend_lint frontend_test frontend_build
 simulator_test simulator_package backend_test backend_package'
 
@@ -637,12 +638,42 @@ main() {
   # 4. docker compose config
   run_guarded_command docker_compose_config docker compose config --quiet || finalize_stop
 
-  # 5. assertions
+  # 5-7. Terraform (only when the candidate touches infra/**)
+  if component_touched infra; then
+    run_guarded_command terraform_fmt \
+      terraform fmt -check -recursive infra || finalize_stop
+
+    [ -d "$REPO_ROOT/infra/homelab" ] || {
+      add_check "$(jq -cn \
+        '{id:"terraform_init", kind:"command", classification:"FAIL_IMPLEMENTATION",
+          failure_kind:"HOMELAB_TERRAFORM_ROOT_MISSING",
+          reason:"infra/homelab is required for infrastructure verification"}')"
+      update_suite_result FAIL_IMPLEMENTATION
+      STOPPED_EARLY=true
+      STOPPED_REASON='"HOMELAB_TERRAFORM_ROOT_MISSING"'
+      finalize_stop
+    }
+
+    run_guarded_command terraform_init \
+      terraform -chdir=infra/homelab init \
+        -backend=false \
+        -input=false \
+        -lockfile=readonly || finalize_stop
+
+    run_guarded_command terraform_validate \
+      terraform -chdir=infra/homelab validate -no-color || finalize_stop
+  else
+    na_check terraform_fmt      "no candidate path under infra/"
+    na_check terraform_init     "no candidate path under infra/"
+    na_check terraform_validate "no candidate path under infra/"
+  fi
+
+  # 8. assertions
   if [ -n "$ASSERTIONS_FILE" ]; then
     run_assertions "$ASSERTIONS_FILE"
   fi
 
-  # 6-9. frontend
+  # 9-12. frontend
   if component_touched frontend; then
     run_guarded_command frontend_install npm --prefix frontend ci        || finalize_stop
     run_guarded_command frontend_lint    npm --prefix frontend run lint  || finalize_stop
@@ -655,7 +686,7 @@ main() {
     na_check frontend_build   "no candidate path under frontend/"
   fi
 
-  # 10-11. simulator
+  # 13-14. simulator
   if component_touched simulators; then
     run_guarded_command simulator_test    mvn -q -f simulators/pom.xml test               || finalize_stop
     run_guarded_command simulator_package mvn -q -f simulators/pom.xml package -DskipTests || finalize_stop
@@ -664,7 +695,7 @@ main() {
     na_check simulator_package "no candidate path under simulators/"
   fi
 
-  # 12-13. backend
+  # 15-16. backend
   if component_touched backend; then
     run_guarded_command backend_test    mvn -q -f backend/pom.xml test               || finalize_stop
     run_guarded_command backend_package mvn -q -f backend/pom.xml package -DskipTests || finalize_stop

@@ -17,6 +17,57 @@ vr_repo() {
   printf '%s' "$r"
 }
 
+# Add synthetic Terraform content to an isolated verifier-test repository.
+# This is fixture-only infrastructure and is never application Terraform.
+vr_add_infra() {
+  local r="$1"
+  mkdir -p "$r/infra/homelab"
+  printf 'terraform {}\n' > "$r/infra/homelab/main.tf"
+  printf '.terraform/\n' >> "$r/.gitignore"
+  fx_commit "$r" infra-fixture
+}
+
+# Run verify.sh with synthetic infra/** allowed for Terraform verifier tests.
+VI() {
+  local repo="$1" bindir="$2"; shift 2
+  VLOG="$(mktemp "$TEST_TMP_ROOT/vlog.XXXXXX")"
+  INVOCATION_LOG="$VLOG" PATH="$bindir:$PATH" \
+    bash "$VERIFY_SH" --repo-root "$repo" \
+      --allowed 'infra/**' \
+      --allowed '.claude/scripts/**' \
+      --allowed '.claude/tests/**' \
+      --protected 'backend/**' \
+      --protected 'README.md' \
+      --protected 'docker-compose.yml' \
+      "$@"
+}
+
+# Run the infra verifier while making only `command -v terraform` report
+# unavailable. All other command lookups retain normal host behaviour.
+# The subshell prevents the command() override from leaking into other tests.
+VI_NO_TERRAFORM() (
+  local repo="$1" bindir="$2"; shift 2
+
+  command() {
+    if [ "${1:-}" = "-v" ] && [ "${2:-}" = "terraform" ]; then
+      return 1
+    fi
+    builtin command "$@"
+  }
+  export -f command
+
+  VLOG="$(mktemp "$TEST_TMP_ROOT/vlog.XXXXXX")"
+  INVOCATION_LOG="$VLOG" PATH="$bindir:$PATH" \
+    bash "$VERIFY_SH" --repo-root "$repo" \
+      --allowed 'infra/**' \
+      --allowed '.claude/scripts/**' \
+      --allowed '.claude/tests/**' \
+      --protected 'backend/**' \
+      --protected 'README.md' \
+      --protected 'docker-compose.yml' \
+      "$@"
+)
+
 # run verify.sh with a fake bin dir on PATH and an invocation-log sentinel
 VLOG=""
 V() {
@@ -29,6 +80,182 @@ V() {
 }
 chk() { jq -r --arg id "$2" '.checks[] | select(.id==$id) | .classification' <<<"$1"; }
 fk() { jq -r --arg id "$2" '.checks[] | select(.id==$id) | .failure_kind' <<<"$1"; }
+cmdline() {
+  jq -r --arg id "$2"     '.checks[] | select(.id==$id) | ((.command // []) | join(" "))' <<<"$1"
+}
+
+# --- Terraform verification ----------------------------------------
+
+# Worktree infra candidate runs the exact deterministic Terraform contract.
+RT0="$(vr_repo)"; vr_add_infra "$RT0"; BT0="$(fx_fakebin_dir)"
+fx_fake_cmd "$BT0" docker 0
+fx_fake_cmd "$BT0" terraform 0
+printf 'change\n' >> "$RT0/infra/homelab/main.tf"
+run_capture VI "$RT0" "$BT0" --mode worktree
+REC="$OUT"
+assert_eq "infra worktree -> terraform_fmt PASS" \
+  "PASS" "$(chk "$REC" terraform_fmt)"
+assert_eq "infra worktree -> terraform_init PASS" \
+  "PASS" "$(chk "$REC" terraform_init)"
+assert_eq "infra worktree -> terraform_validate PASS" \
+  "PASS" "$(chk "$REC" terraform_validate)"
+assert_eq "terraform fmt exact invocation" \
+  "terraform fmt -check -recursive infra" "$(cmdline "$REC" terraform_fmt)"
+assert_eq "terraform init exact invocation" \
+  "terraform -chdir=infra/homelab init -backend=false -input=false -lockfile=readonly" \
+  "$(cmdline "$REC" terraform_init)"
+assert_eq "terraform validate exact invocation" \
+  "terraform -chdir=infra/homelab validate -no-color" \
+  "$(cmdline "$REC" terraform_validate)"
+
+# Verification Record remains metadata-only for Terraform output.
+RTM="$(vr_repo)"; vr_add_infra "$RTM"; BTM="$(fx_fakebin_dir)"
+fx_fake_cmd "$BTM" docker 0
+TF_SENTINEL="TERRAFORM-RAW-OUTPUT-MUST-NOT-PERSIST"
+fx_fake_cmd "$BTM" terraform 0 'printf "%s\n" "'"$TF_SENTINEL"'"'
+printf 'change\n' >> "$RTM/infra/homelab/main.tf"
+run_capture VI "$RTM" "$BTM" --mode worktree
+assert_not_contains "Terraform raw output absent from Verification Record" \
+  "$OUT" "$TF_SENTINEL"
+assert_contains "Terraform check records output digest metadata" \
+  "$(jq -c '.checks[] | select(.id=="terraform_fmt")' <<<"$OUT")" '"output_sha256"'
+
+# Non-infrastructure candidates do not gain a Terraform dependency.
+RT1="$(vr_repo)"; BT1="$(fx_fakebin_dir)"
+fx_fake_cmd "$BT1" docker 0
+printf 'edit\n' >> "$RT1/.claude/scripts/a.sh"
+run_capture V "$RT1" "$BT1" --mode worktree
+REC="$OUT"
+assert_eq "non-infra -> terraform_fmt NOT_APPLICABLE" \
+  "NOT_APPLICABLE" "$(chk "$REC" terraform_fmt)"
+assert_eq "non-infra -> terraform_init NOT_APPLICABLE" \
+  "NOT_APPLICABLE" "$(chk "$REC" terraform_init)"
+assert_eq "non-infra -> terraform_validate NOT_APPLICABLE" \
+  "NOT_APPLICABLE" "$(chk "$REC" terraform_validate)"
+assert_not_contains "non-infra candidate does not invoke Terraform" \
+  "$(cat "$VLOG")" "terraform"
+
+# A genuinely missing Terraform executable uses the existing
+# command-availability fail-closed path. The shim affects only command lookup;
+# there is deliberately no fake terraform executable.
+RT2="$(vr_repo)"; vr_add_infra "$RT2"; BT2="$(fx_fakebin_dir)"
+fx_fake_cmd "$BT2" docker 0
+printf 'change\n' >> "$RT2/infra/homelab/main.tf"
+
+run_capture VI_NO_TERRAFORM "$RT2" "$BT2" --mode worktree
+REC="$OUT"
+
+assert_json "missing Terraform still produces a Verification Record" "$REC"
+assert_eq "missing Terraform executable -> TOOL_UNAVAILABLE" \
+  "TOOL_UNAVAILABLE" "$(chk "$REC" terraform_fmt)"
+assert_eq "missing Terraform executable has no exit code" \
+  "null" "$(jq -r '.checks[] | select(.id=="terraform_fmt") | .exit_code' <<<"$REC")"
+assert_eq "missing Terraform prevents verification PASS" \
+  "FAIL" "$(jq -r '.result' <<<"$REC")"
+
+# Formatting failure prevents PASS; existing command-failure semantics continue
+# running the remaining independent Terraform checks.
+RT3="$(vr_repo)"; vr_add_infra "$RT3"; BT3="$(fx_fakebin_dir)"
+fx_fake_cmd "$BT3" docker 0
+fx_fake_cmd "$BT3" terraform 0 \
+  'case "$*" in "fmt -check -recursive infra") exit 1 ;; esac'
+printf 'change\n' >> "$RT3/infra/homelab/main.tf"
+run_capture VI "$RT3" "$BT3" --mode worktree
+assert_eq "terraform fmt failure -> FAIL_IMPLEMENTATION" \
+  "FAIL_IMPLEMENTATION" "$(chk "$OUT" terraform_fmt)"
+assert_eq "terraform fmt failure -> init still runs and passes" \
+  "PASS" "$(chk "$OUT" terraform_init)"
+assert_eq "terraform fmt failure -> validate still runs and passes" \
+  "PASS" "$(chk "$OUT" terraform_validate)"
+assert_eq "terraform fmt failure prevents suite PASS" \
+  "FAIL" "$(jq -r '.result' <<<"$OUT")"
+
+# Initialization failure prevents PASS.
+RT4="$(vr_repo)"; vr_add_infra "$RT4"; BT4="$(fx_fakebin_dir)"
+fx_fake_cmd "$BT4" docker 0
+fx_fake_cmd "$BT4" terraform 0 \
+  'case "$*" in *" init "*) exit 1 ;; esac'
+printf 'change\n' >> "$RT4/infra/homelab/main.tf"
+run_capture VI "$RT4" "$BT4" --mode worktree
+assert_eq "terraform init failure -> fmt PASS" \
+  "PASS" "$(chk "$OUT" terraform_fmt)"
+assert_eq "terraform init failure -> FAIL_IMPLEMENTATION" \
+  "FAIL_IMPLEMENTATION" "$(chk "$OUT" terraform_init)"
+assert_eq "terraform init failure -> validate still runs" \
+  "PASS" "$(chk "$OUT" terraform_validate)"
+assert_eq "terraform init failure prevents suite PASS" \
+  "FAIL" "$(jq -r '.result' <<<"$OUT")"
+
+# Validation failure prevents PASS.
+RT5="$(vr_repo)"; vr_add_infra "$RT5"; BT5="$(fx_fakebin_dir)"
+fx_fake_cmd "$BT5" docker 0
+fx_fake_cmd "$BT5" terraform 0 \
+  'case "$*" in *" validate "*) exit 1 ;; esac'
+printf 'change\n' >> "$RT5/infra/homelab/main.tf"
+run_capture VI "$RT5" "$BT5" --mode worktree
+assert_eq "terraform validate failure -> fmt PASS" \
+  "PASS" "$(chk "$OUT" terraform_fmt)"
+assert_eq "terraform validate failure -> init PASS" \
+  "PASS" "$(chk "$OUT" terraform_init)"
+assert_eq "terraform validate failure -> FAIL_IMPLEMENTATION" \
+  "FAIL_IMPLEMENTATION" "$(chk "$OUT" terraform_validate)"
+
+# Verification-created Terraform mutation is caught by the existing fingerprint guard.
+RT6="$(vr_repo)"; vr_add_infra "$RT6"; BT6="$(fx_fakebin_dir)"
+fx_fake_cmd "$BT6" docker 0
+fx_fake_cmd "$BT6" terraform 0 \
+  'case "$*" in "fmt -check -recursive infra") printf "MUTATED\n" >> infra/homelab/main.tf ;; esac'
+printf 'change\n' >> "$RT6/infra/homelab/main.tf"
+run_capture VI "$RT6" "$BT6" --mode worktree
+REC="$OUT"
+assert_eq "Terraform mutation -> FAIL_WORKTREE_MUTATION" \
+  "FAIL_WORKTREE_MUTATION" "$(chk "$REC" terraform_fmt)"
+assert_eq "Terraform mutation -> VERIFICATION_MUTATED_CANDIDATE" \
+  "VERIFICATION_MUTATED_CANDIDATE" "$(fk "$REC" terraform_fmt)"
+assert_eq "Terraform mutation stops suite" \
+  "true" "$(jq -r '.stopped_early' <<<"$REC")"
+assert_contains "Terraform mutation identifies candidate path" \
+  "$REC" "infra/homelab/main.tf"
+assert_contains "Terraform mutation is not reverted" \
+  "$(cat "$RT6/infra/homelab/main.tf")" "MUTATED"
+
+# infra/** candidate requires the planned homelab Terraform root.
+RT7="$(vr_repo)"; BT7="$(fx_fakebin_dir)"
+fx_fake_cmd "$BT7" docker 0
+fx_fake_cmd "$BT7" terraform 0
+mkdir -p "$RT7/infra"
+printf 'candidate\n' > "$RT7/infra/root.tf"
+run_capture VI "$RT7" "$BT7" --mode worktree
+REC="$OUT"
+assert_eq "missing infra/homelab -> fmt still runs first" \
+  "PASS" "$(chk "$REC" terraform_fmt)"
+assert_eq "missing infra/homelab -> init FAIL_IMPLEMENTATION" \
+  "FAIL_IMPLEMENTATION" "$(chk "$REC" terraform_init)"
+assert_eq "missing infra/homelab failure kind" \
+  "HOMELAB_TERRAFORM_ROOT_MISSING" "$(fk "$REC" terraform_init)"
+assert_eq "missing infra/homelab -> validate NOT_RUN" \
+  "NOT_RUN" "$(chk "$REC" terraform_validate)"
+
+# Staged verification also selects infra/** from the staged candidate.
+RT8="$(vr_repo)"; vr_add_infra "$RT8"; BT8="$(fx_fakebin_dir)"
+fx_fake_cmd "$BT8" docker 0
+fx_fake_cmd "$BT8" terraform 0
+printf 'staged-change\n' >> "$RT8/infra/homelab/main.tf"
+rm8tf="$(mktemp "$TEST_TMP_ROOT/rm-tf.XXXXXX.json")"
+bash "$CANDIDATE_SH" --repo-root "$RT8" manifest > "$rm8tf"
+git -C "$RT8" add -A
+run_capture VI "$RT8" "$BT8" --mode staged --reviewed-manifest "$rm8tf"
+REC="$OUT"
+assert_eq "staged infra -> staged_match PASS" \
+  "PASS" "$(chk "$REC" staged_match)"
+assert_eq "staged infra -> terraform_fmt PASS" \
+  "PASS" "$(chk "$REC" terraform_fmt)"
+assert_eq "staged infra -> terraform_init PASS" \
+  "PASS" "$(chk "$REC" terraform_init)"
+assert_eq "staged infra -> terraform_validate PASS" \
+  "PASS" "$(chk "$REC" terraform_validate)"
+assert_eq "staged infra records exact Terraform fmt invocation" \
+  "terraform fmt -check -recursive infra" "$(cmdline "$REC" terraform_fmt)"
 
 # --- component selection -------------------------------------------
 
