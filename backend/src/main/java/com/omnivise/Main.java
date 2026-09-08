@@ -55,6 +55,10 @@ public class Main {
                 wsHandler);
         changeStreamListener.start();
 
+        // Stop the Change Stream listener cleanly on application shutdown (SIGTERM / Ctrl-C).
+        Runtime.getRuntime().addShutdownHook(
+                new Thread(changeStreamListener::stop, "shutdown-changestream"));
+
         // Test MongoDB connection by fetching 5 latest readings
         List<SensorReading> testLatestReadings = sensorService.getLatestReadings(5);
         System.out.println("📊 Latest 5 sensor readings: " + testLatestReadings.size() + " found");
