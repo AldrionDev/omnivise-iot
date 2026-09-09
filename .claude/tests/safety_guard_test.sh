@@ -24,6 +24,23 @@ ga() { assert_ok "$1" fx_guard "$2" "$3" "$4" "${5:-$FX_PD}"; }
 
 fwe() { fx_edit_input "$1" "${2:-Write}"; }   # framework-write payload (file_path)
 
+# Issue #67: the PreToolUse guards enforce their rules ONLY when
+# OMNIVISE_WORKFLOW_MODE is exactly "orchestrator". RM is that mode. The rule
+# sections below (2-10) were originally written against "issue" mode; they now run
+# under RM and are the regression surface for "orchestrator behavior unchanged".
+# Section 1 and gp() cover the pass-through (inert) behavior in every other mode.
+RM="orchestrator"
+
+# gp NAME GUARD JSON [PDIR] — assert pass-through (exit 0) for a would-be-blocked
+# payload across every non-orchestrator mode: unset, empty, a named mode, and a
+# malformed value.
+gp() {
+  local n="$1" g="$2" j="$3" p="${4:-$FX_PD}" m
+  for m in -unset- "" issue framework-maintenance not-a-real-mode; do
+    assert_ok "$n [$m]" fx_guard "$m" "$g" "$j" "$p"
+  done
+}
+
 # --- real-repository isolation: snapshot before ----------------------------
 REPO_BRANCH_BEFORE="$(git -C "$OMNIVISE_REPO_ROOT" rev-parse --abbrev-ref HEAD)"
 REPO_STATUS_BEFORE="$(git -C "$OMNIVISE_REPO_ROOT" status --porcelain)"
@@ -34,30 +51,54 @@ REPO_INDEX_BEFORE="$(git -C "$OMNIVISE_REPO_ROOT" diff --cached --name-only)"
 # 1. Execution mode (through both PreToolUse guards)
 # ========================================================================
 
-gd "mode: unset -> strict framework deny" SAFETY_FRAMEWORK_MUTATION_DENIED \
-  "-unset-" "$G_FW" "$(fwe '.claude/scripts/verify.sh')"
-gd "mode: unset -> strict git deny" SAFETY_GIT_MUTATION_DENIED \
-  "-unset-" "$G_SH" "$(fx_bash_input 'git add -A')"
-gd "mode: empty -> strict (not MODE_INVALID)" SAFETY_FRAMEWORK_MUTATION_DENIED \
-  "" "$G_FW" "$(fwe '.claude/settings.json')"
-gd "mode: issue -> strict framework deny" SAFETY_FRAMEWORK_MUTATION_DENIED \
-  "issue" "$G_FW" "$(fwe '.claude/hooks/shell-guard.sh')"
-ga "mode: framework-maintenance -> framework write allowed" \
-  "framework-maintenance" "$G_FW" "$(fwe '.claude/scripts/verify.sh')"
-gd "mode: framework-maintenance -> git still denied" SAFETY_GIT_MUTATION_DENIED \
-  "framework-maintenance" "$G_SH" "$(fx_bash_input 'git commit -m x')"
-gd "mode: framework-maintenance -> non-allowlisted Bash still denied" SAFETY_SHELL_COMMAND_DENIED \
-  "framework-maintenance" "$G_SH" "$(fx_bash_input "python3 -c x")"
-gd "mode: framework-maintenance -> git-metadata write still denied" SAFETY_GIT_METADATA_MUTATION_DENIED \
-  "framework-maintenance" "$G_FW" "$(fwe '.git/config')"
-for bad in frameworkmaintenance ISSUE Issue x " " maintenance; do
-  gd "mode: malformed '$bad' (framework guard)" SAFETY_MODE_INVALID \
-    "$bad" "$G_FW" "$(fwe 'backend/src/Main.java')"
-  gd "mode: malformed '$bad' (shell guard)" SAFETY_MODE_INVALID \
-    "$bad" "$G_SH" "$(fx_bash_input 'git status')"
+# Issue #67: the PreToolUse guards are INERT unless OMNIVISE_WORKFLOW_MODE is
+# exactly "orchestrator". Every other value — unset, empty, "issue",
+# "framework-maintenance", or anything malformed — passes through (exit 0) before
+# any rule evaluation, so a would-be-blocked payload is allowed.
+for m in -unset- "" issue framework-maintenance frameworkmaintenance ISSUE Issue x " " maintenance; do
+  ga "mode: '$m' -> framework guard pass-through (.claude write)" \
+    "$m" "$G_FW" "$(fwe '.claude/settings.json')"
+  ga "mode: '$m' -> framework guard pass-through (git metadata)" \
+    "$m" "$G_FW" "$(fwe '.git/config')"
+  ga "mode: '$m' -> shell guard pass-through (git lifecycle)" \
+    "$m" "$G_SH" "$(fx_bash_input 'git add -A')"
+  ga "mode: '$m' -> shell guard pass-through (non-allowlisted)" \
+    "$m" "$G_SH" "$(fx_bash_input 'python3 -c x')"
 done
-gd "mode: payload-supplied mode is ignored" SAFETY_FRAMEWORK_MUTATION_DENIED \
-  "-unset-" "$G_FW" "$(fx_hook_input Edit '{"mode":"framework-maintenance","file_path":".claude/x"}')"
+ga "mode: a payload-supplied mode field is inert (pass-through anyway)" \
+  "-unset-" "$G_FW" "$(fx_hook_input Edit '{"mode":"orchestrator","file_path":".claude/x"}')"
+
+# Orchestrator mode: the boundary is active. Sections 2-10 are the full
+# regression surface; these two lines are the anchor for "still restricted".
+gd "mode: orchestrator -> framework deny still active" SAFETY_FRAMEWORK_MUTATION_DENIED \
+  "orchestrator" "$G_FW" "$(fwe '.claude/hooks/shell-guard.sh')"
+gd "mode: orchestrator -> git deny still active" SAFETY_GIT_MUTATION_DENIED \
+  "orchestrator" "$G_SH" "$(fx_bash_input 'git add -A')"
+
+# ========================================================================
+# 1b. Issue #67 pass-through — every rule surface is inert outside orchestrator
+#     mode. Each payload below is rejected in orchestrator mode (sections 2-10);
+#     here it is allowed for unset / empty / issue / framework-maintenance /
+#     malformed OMNIVISE_WORKFLOW_MODE.
+# ========================================================================
+
+PD_PT="$(fx_pdir)"
+ln -s /etc "$PD_PT/etclink"
+
+gp "pass-through: framework .claude/** write"  "$G_FW" "$(fwe '.claude/hooks/shell-guard.sh')"
+gp "pass-through: git-metadata write"          "$G_FW" "$(fwe '.git/config')" "$PD_PT"
+gp "pass-through: outside-repo write (symlink)" "$G_FW" "$(fwe 'etclink/hosts')" "$PD_PT"
+gp "pass-through: outside-repo write (absolute)" "$G_FW" "$(fwe '/etc/cron.d/x')" "$PD_PT"
+gp "pass-through: NotebookEdit into .claude"   "$G_FW" "$(fx_notebook_input '.claude/x.ipynb')"
+gp "pass-through: git lifecycle"               "$G_SH" "$(fx_bash_input 'git commit -m x')"
+gp "pass-through: gh"                          "$G_SH" "$(fx_bash_input 'gh pr create -t a -b b')"
+gp "pass-through: arbitrary interpreter"       "$G_SH" "$(fx_bash_input 'python3 -c open')"
+gp "pass-through: output redirection"          "$G_SH" "$(fx_bash_input 'git status > out.txt')"
+gp "pass-through: verify.sh"                   "$G_SH" "$(fx_bash_input 'bash .claude/scripts/verify.sh --mode worktree')"
+gp "pass-through: workflow-state mutation"     "$G_SH" "$(fx_bash_input 'bash .claude/scripts/workflow-state.sh transition COMMIT')"
+gp "pass-through: orchestrator.sh entry point" "$G_SH" "$(fx_bash_input 'bash .claude/scripts/orchestrator.sh commit')"
+gp "pass-through: lifecycle.sh direct call"    "$G_SH" "$(fx_bash_input 'bash .claude/scripts/lifecycle.sh stage')"
+gp "pass-through: human-gate.sh direct call"   "$G_SH" "$(fx_bash_input 'bash .claude/scripts/human-gate.sh approve')"
 
 # ========================================================================
 # 2. Framework-path writes (framework-write-guard.sh)
@@ -78,21 +119,21 @@ for spec in \
 do
   p="${spec%%|*}"; t="${spec#*|}"
   gd "framework deny (issue): $t $p" SAFETY_FRAMEWORK_MUTATION_DENIED \
-    "issue" "$G_FW" "$(fwe "$p" "$t")"
+    "$RM" "$G_FW" "$(fwe "$p" "$t")"
 done
 gd "framework deny (issue): NotebookEdit .claude/analysis.ipynb" SAFETY_FRAMEWORK_MUTATION_DENIED \
-  "issue" "$G_FW" "$(fx_notebook_input '.claude/analysis.ipynb')"
+  "$RM" "$G_FW" "$(fx_notebook_input '.claude/analysis.ipynb')"
 gd "framework deny (issue): absolute path into .claude" SAFETY_FRAMEWORK_MUTATION_DENIED \
-  "issue" "$G_FW" "$(fwe "$FX_PD/.claude/scripts/x")"
+  "$RM" "$G_FW" "$(fwe "$FX_PD/.claude/scripts/x")"
 
 # --- symlink alias resolving into .claude/  -> still denied in issue mode
 PD_SYM="$(fx_pdir)"
 ln -s "$PD_SYM/.claude" "$PD_SYM/alias"
 ln -s "$PD_SYM/.claude/hooks" "$PD_SYM/hlink"
 gd "framework deny (issue): prefix symlink alias -> .claude/settings.json" SAFETY_FRAMEWORK_MUTATION_DENIED \
-  "issue" "$G_FW" "$(fwe 'alias/settings.json')" "$PD_SYM"
+  "$RM" "$G_FW" "$(fwe 'alias/settings.json')" "$PD_SYM"
 gd "framework deny (issue): prefix symlink alias -> .claude/hooks/x.sh" SAFETY_FRAMEWORK_MUTATION_DENIED \
-  "issue" "$G_FW" "$(fwe 'hlink/x.sh')" "$PD_SYM"
+  "$RM" "$G_FW" "$(fwe 'hlink/x.sh')" "$PD_SYM"
 
 # --- issue mode: ALLOW (permitted non-framework candidate mutation)
 for spec in \
@@ -105,12 +146,12 @@ for spec in \
   "src/app/service.ts|Edit"
 do
   p="${spec%%|*}"; t="${spec#*|}"
-  ga "non-framework write allowed (issue): $t $p" "issue" "$G_FW" "$(fwe "$p" "$t")"
+  ga "non-framework write allowed (issue): $t $p" "$RM" "$G_FW" "$(fwe "$p" "$t")"
 done
 ga "repo-other write allowed (issue): deep new nested path" \
-  "issue" "$G_FW" "$(fwe 'backend/src/main/java/app/New.java')"
+  "$RM" "$G_FW" "$(fwe 'backend/src/main/java/app/New.java')"
 ga "repo-other write allowed (issue): absolute path inside the repo" \
-  "issue" "$G_FW" "$(fwe "$FX_PD/backend/src/Deep.java")"
+  "$RM" "$G_FW" "$(fwe "$FX_PD/backend/src/Deep.java")"
 
 # ========================================================================
 # 2a. Outside-repo writes (framework-write-guard.sh) — DENY in EVERY mode
@@ -123,33 +164,36 @@ ln -s /etc "$PD_OUT/e"
 ln -s /tmp "$PD_OUT/tmplink"
 
 gd "outside-repo deny (issue): in-repo symlink resolving to /etc" SAFETY_OUTSIDE_REPO_WRITE_DENIED \
-  "issue" "$G_FW" "$(fwe 'e/hosts')" "$PD_OUT"
+  "$RM" "$G_FW" "$(fwe 'e/hosts')" "$PD_OUT"
 gd "outside-repo deny (issue): in-repo symlink resolving to /tmp" SAFETY_OUTSIDE_REPO_WRITE_DENIED \
-  "issue" "$G_FW" "$(fwe 'tmplink/x')" "$PD_OUT"
+  "$RM" "$G_FW" "$(fwe 'tmplink/x')" "$PD_OUT"
 gd "outside-repo deny (issue): absolute path outside the repo" SAFETY_OUTSIDE_REPO_WRITE_DENIED \
-  "issue" "$G_FW" "$(fwe '/etc/cron.d/x')" "$PD_OUT"
+  "$RM" "$G_FW" "$(fwe '/etc/cron.d/x')" "$PD_OUT"
 gd "outside-repo deny (issue): \$HOME/.gitconfig-style absolute path" SAFETY_OUTSIDE_REPO_WRITE_DENIED \
-  "issue" "$G_FW" "$(fwe "$HOME/.gitconfig")" "$PD_OUT"
+  "$RM" "$G_FW" "$(fwe "$HOME/.gitconfig")" "$PD_OUT"
 gd "outside-repo deny (issue): parent-escape via ../" SAFETY_OUTSIDE_REPO_WRITE_DENIED \
-  "issue" "$G_FW" "$(fwe '../escapee/x')" "$PD_OUT"
+  "$RM" "$G_FW" "$(fwe '../escapee/x')" "$PD_OUT"
 gd "outside-repo deny (issue): sibling directory of the project root" SAFETY_OUTSIDE_REPO_WRITE_DENIED \
-  "issue" "$G_FW" "$(fwe "$(dirname "$PD_OUT")/sibling-dir/x")" "$PD_OUT"
+  "$RM" "$G_FW" "$(fwe "$(dirname "$PD_OUT")/sibling-dir/x")" "$PD_OUT"
 # path-segment-safe containment: a sibling whose name shares the root's prefix
 # ("<root>-sibling") is NOT inside "<root>".
 gd "outside-repo deny (issue): sibling sharing a name prefix with the root" SAFETY_OUTSIDE_REPO_WRITE_DENIED \
-  "issue" "$G_FW" "$(fwe "${PD_OUT}-sibling/x")" "$PD_OUT"
+  "$RM" "$G_FW" "$(fwe "${PD_OUT}-sibling/x")" "$PD_OUT"
 gd "outside-repo deny (maintenance): absolute path outside the repo still denied" SAFETY_OUTSIDE_REPO_WRITE_DENIED \
-  "framework-maintenance" "$G_FW" "$(fwe '/etc/cron.d/x')" "$PD_OUT"
+  "$RM" "$G_FW" "$(fwe '/etc/cron.d/x')" "$PD_OUT"
 gd "outside-repo deny (maintenance): in-repo symlink to outside still denied" SAFETY_OUTSIDE_REPO_WRITE_DENIED \
-  "framework-maintenance" "$G_FW" "$(fwe 'e/hosts')" "$PD_OUT"
+  "$RM" "$G_FW" "$(fwe 'e/hosts')" "$PD_OUT"
 
 # normal in-repo candidate writes remain allowed even next to the escapes above
 ga "repo-other write allowed (issue): ordinary file in the same project" \
-  "issue" "$G_FW" "$(fwe 'backend/src/Ok.java')" "$PD_OUT"
+  "$RM" "$G_FW" "$(fwe 'backend/src/Ok.java')" "$PD_OUT"
 
-# --- framework-maintenance: ALLOW framework writes
+# --- Issue #67: the framework-maintenance .claude/** relaxation is unreachable
+#     now (the value "framework-maintenance" triggers pass-through before
+#     mode_effective is consulted). These writes are simply allowed, like every
+#     other payload, outside orchestrator mode.
 for p in ".claude/scripts/verify.sh" ".claude/settings.json" ".claude/agents/planner.md" ".claude/hooks/shell-guard.sh"; do
-  ga "framework write allowed (maintenance): $p" "framework-maintenance" "$G_FW" "$(fwe "$p")"
+  gp "pass-through: framework write $p" "$G_FW" "$(fwe "$p")"
 done
 
 # ========================================================================
@@ -159,36 +203,36 @@ done
 PD_GM="$(fx_pdir)"
 for p in ".git/HEAD" ".git/config" ".git/index" ".git/refs/heads/main" ".git/hooks/pre-commit" ".git/logs/HEAD"; do
   gd "git-metadata deny (issue): $p" SAFETY_GIT_METADATA_MUTATION_DENIED \
-    "issue" "$G_FW" "$(fwe "$p")" "$PD_GM"
+    "$RM" "$G_FW" "$(fwe "$p")" "$PD_GM"
 done
 gd "git-metadata deny (issue): absolute --absolute-git-dir/x" SAFETY_GIT_METADATA_MUTATION_DENIED \
-  "issue" "$G_FW" "$(fwe "$(git -C "$PD_GM" rev-parse --absolute-git-dir)/x")" "$PD_GM"
+  "$RM" "$G_FW" "$(fwe "$(git -C "$PD_GM" rev-parse --absolute-git-dir)/x")" "$PD_GM"
 gd "git-metadata deny (issue): absolute --git-common-dir/config" SAFETY_GIT_METADATA_MUTATION_DENIED \
-  "issue" "$G_FW" "$(fwe "$(git -C "$PD_GM" rev-parse --git-common-dir)/config")" "$PD_GM"
+  "$RM" "$G_FW" "$(fwe "$(git -C "$PD_GM" rev-parse --git-common-dir)/config")" "$PD_GM"
 gd "git-metadata deny (issue): the .git leaf itself" SAFETY_GIT_METADATA_MUTATION_DENIED \
-  "issue" "$G_FW" "$(fwe "$PD_GM/.git")" "$PD_GM"
+  "$RM" "$G_FW" "$(fwe "$PD_GM/.git")" "$PD_GM"
 gd "git-metadata deny (maintenance): .git/config" SAFETY_GIT_METADATA_MUTATION_DENIED \
-  "framework-maintenance" "$G_FW" "$(fwe '.git/config')" "$PD_GM"
+  "$RM" "$G_FW" "$(fwe '.git/config')" "$PD_GM"
 
 ln -s "$PD_GM/.git" "$PD_GM/gitlink"
 gd "git-metadata deny (issue): symlink resolving into .git" SAFETY_GIT_METADATA_MUTATION_DENIED \
-  "issue" "$G_FW" "$(fwe 'gitlink/config')" "$PD_GM"
+  "$RM" "$G_FW" "$(fwe 'gitlink/config')" "$PD_GM"
 
 for p in ".gitignore" ".gitattributes" "src/x" ".github/workflows/x.yml"; do
-  ga "git-metadata: non-.git path allowed (issue): $p" "issue" "$G_FW" "$(fwe "$p")" "$PD_GM"
+  ga "git-metadata: non-.git path allowed (issue): $p" "$RM" "$G_FW" "$(fwe "$p")" "$PD_GM"
 done
 
 # --- linked worktree
 PD_WTBASE="$(fx_pdir)"
 WT="$(fx_worktree "$PD_WTBASE" a)"
 gd "git-metadata deny (worktree): the .git pointer file" SAFETY_GIT_METADATA_MUTATION_DENIED \
-  "issue" "$G_FW" "$(fwe "$WT/.git")" "$WT"
+  "$RM" "$G_FW" "$(fwe "$WT/.git")" "$WT"
 gd "git-metadata deny (worktree): common-dir/config" SAFETY_GIT_METADATA_MUTATION_DENIED \
-  "issue" "$G_FW" "$(fwe "$(git -C "$WT" rev-parse --git-common-dir)/config")" "$WT"
+  "$RM" "$G_FW" "$(fwe "$(git -C "$WT" rev-parse --git-common-dir)/config")" "$WT"
 gd "git-metadata deny (worktree): absolute-git-dir/index" SAFETY_GIT_METADATA_MUTATION_DENIED \
-  "issue" "$G_FW" "$(fwe "$(git -C "$WT" rev-parse --absolute-git-dir)/index")" "$WT"
+  "$RM" "$G_FW" "$(fwe "$(git -C "$WT" rev-parse --absolute-git-dir)/index")" "$WT"
 ga "git-metadata (worktree): ordinary worktree file allowed" \
-  "issue" "$G_FW" "$(fwe "$WT/src/ok.txt")" "$WT"
+  "$RM" "$G_FW" "$(fwe "$WT/src/ok.txt")" "$WT"
 
 # --- fail-closed when Git-metadata discovery cannot be trusted
 GIT_SHADOW="$(mktemp -d "$TEST_TMP_ROOT/gitshadow.XXXXXX")"
@@ -196,12 +240,12 @@ printf '#!/usr/bin/env bash\nexit 1\n' >"$GIT_SHADOW/git"
 chmod +x "$GIT_SHADOW/git"
 FX_GUARD_PATH="$GIT_SHADOW"
 gd "git broken -> .git write denied (fail-closed)" SAFETY_PATH_UNRESOLVED \
-  "issue" "$G_FW" "$(fwe "$PD_GM/.git/HEAD")" "$PD_GM"
+  "$RM" "$G_FW" "$(fwe "$PD_GM/.git/HEAD")" "$PD_GM"
 gd "git broken -> ordinary write ALSO denied (no lexical-fallback allow)" SAFETY_PATH_UNRESOLVED \
-  "issue" "$G_FW" "$(fwe "$PD_GM/src/x")" "$PD_GM"
+  "$RM" "$G_FW" "$(fwe "$PD_GM/src/x")" "$PD_GM"
 FX_GUARD_PATH=""
 gd "unresolved project root -> PATH_UNRESOLVED" SAFETY_PATH_UNRESOLVED \
-  "issue" "$G_FW" "$(fwe '.claude/x')" "/no/such/project/dir/xyz"
+  "$RM" "$G_FW" "$(fwe '.claude/x')" "/no/such/project/dir/xyz"
 
 # ========================================================================
 # 3. Bash — arbitrary writers & non-allowlisted commands (issue) -> SAFETY_SHELL_COMMAND_DENIED
@@ -209,7 +253,7 @@ gd "unresolved project root -> PATH_UNRESOLVED" SAFETY_PATH_UNRESOLVED \
 
 while IFS= read -r c; do
   [ -n "$c" ] || continue
-  gd "shell deny: $c" SAFETY_SHELL_COMMAND_DENIED "issue" "$G_SH" "$(fx_bash_input "$c")"
+  gd "shell deny: $c" SAFETY_SHELL_COMMAND_DENIED "$RM" "$G_SH" "$(fx_bash_input "$c")"
 done <<'CMDS'
 python3 -c open
 python -c import
@@ -241,19 +285,19 @@ bash /tmp/evil.sh
 bash ./scripts/other.sh
 CMDS
 gd "shell deny: leading VAR= assignment" SAFETY_SHELL_COMMAND_DENIED \
-  "issue" "$G_SH" "$(fx_bash_input 'OMNIVISE_WORKFLOW_MODE=framework-maintenance git status')"
+  "$RM" "$G_SH" "$(fx_bash_input 'OMNIVISE_WORKFLOW_MODE=framework-maintenance git status')"
 gd "shell deny: redirect >" SAFETY_SHELL_COMMAND_DENIED \
-  "issue" "$G_SH" "$(fx_bash_input 'git status > out.txt')"
+  "$RM" "$G_SH" "$(fx_bash_input 'git status > out.txt')"
 gd "shell deny: append >>" SAFETY_SHELL_COMMAND_DENIED \
-  "issue" "$G_SH" "$(fx_bash_input 'git log >> out.txt')"
+  "$RM" "$G_SH" "$(fx_bash_input 'git log >> out.txt')"
 gd "shell deny: command substitution \$( )" SAFETY_SHELL_COMMAND_DENIED \
-  "issue" "$G_SH" "$(fx_bash_input 'bash .claude/scripts/verify.sh --record $(pwd)/x')"
+  "$RM" "$G_SH" "$(fx_bash_input 'bash .claude/scripts/verify.sh --record $(pwd)/x')"
 gd "shell deny: backtick substitution" SAFETY_SHELL_COMMAND_DENIED \
-  "issue" "$G_SH" "$(fx_bash_input 'git log `whoami`')"
+  "$RM" "$G_SH" "$(fx_bash_input 'git log `whoami`')"
 gd "shell deny: pipeline into denied writer" SAFETY_SHELL_COMMAND_DENIED \
-  "issue" "$G_SH" "$(fx_bash_input 'git diff | tee patch.txt')"
+  "$RM" "$G_SH" "$(fx_bash_input 'git diff | tee patch.txt')"
 gd "shell deny: empty command" SAFETY_INPUT_INVALID \
-  "issue" "$G_SH" "$(fx_hook_input Bash '{"command":""}')"
+  "$RM" "$G_SH" "$(fx_hook_input Bash '{"command":""}')"
 
 # ========================================================================
 # 4. Git lifecycle deny (shell-guard.sh, issue) -> SAFETY_GIT_MUTATION_DENIED
@@ -261,7 +305,7 @@ gd "shell deny: empty command" SAFETY_INPUT_INVALID \
 
 while IFS= read -r c; do
   [ -n "$c" ] || continue
-  gd "git lifecycle deny: $c" SAFETY_GIT_MUTATION_DENIED "issue" "$G_SH" "$(fx_bash_input "$c")"
+  gd "git lifecycle deny: $c" SAFETY_GIT_MUTATION_DENIED "$RM" "$G_SH" "$(fx_bash_input "$c")"
 done <<'GITS'
 git add -A
 git add .claude/scripts/x
@@ -305,9 +349,9 @@ git clone url
 git frobnicate
 GITS
 gd "git deny: chained 2nd segment (true && git push)" SAFETY_GIT_MUTATION_DENIED \
-  "issue" "$G_SH" "$(fx_bash_input 'git status && git push')"
+  "$RM" "$G_SH" "$(fx_bash_input 'git status && git push')"
 gd "git deny: /usr/bin/git add is SHELL_COMMAND_DENIED (first token not 'git')" SAFETY_SHELL_COMMAND_DENIED \
-  "issue" "$G_SH" "$(fx_bash_input '/usr/bin/git add -A')"
+  "$RM" "$G_SH" "$(fx_bash_input '/usr/bin/git add -A')"
 
 # ========================================================================
 # 4b. Git global options & off-grammar args (issue) -> SAFETY_GIT_MUTATION_DENIED
@@ -315,7 +359,7 @@ gd "git deny: /usr/bin/git add is SHELL_COMMAND_DENIED (first token not 'git')" 
 
 while IFS= read -r c; do
   [ -n "$c" ] || continue
-  gd "git grammar deny: $c" SAFETY_GIT_MUTATION_DENIED "issue" "$G_SH" "$(fx_bash_input "$c")"
+  gd "git grammar deny: $c" SAFETY_GIT_MUTATION_DENIED "$RM" "$G_SH" "$(fx_bash_input "$c")"
 done <<'GRAM'
 git -c core.fsmonitor=/tmp/x status
 git -c core.pager=/tmp/x log
@@ -357,7 +401,7 @@ GRAM
 
 while IFS= read -r c; do
   [ -n "$c" ] || continue
-  gd "gh deny: $c" SAFETY_GITHUB_MUTATION_DENIED "issue" "$G_SH" "$(fx_bash_input "$c")"
+  gd "gh deny: $c" SAFETY_GITHUB_MUTATION_DENIED "$RM" "$G_SH" "$(fx_bash_input "$c")"
 done <<'GHS'
 gh pr create -t x -b y
 gh pr merge 12 --squash
@@ -374,7 +418,7 @@ gh pr view 12
 gh secret set X
 GHS
 gd "gh deny: chained 2nd segment" SAFETY_GITHUB_MUTATION_DENIED \
-  "issue" "$G_SH" "$(fx_bash_input 'git status && gh pr create -t a -b b')"
+  "$RM" "$G_SH" "$(fx_bash_input 'git status && gh pr create -t a -b b')"
 
 # ========================================================================
 # 6. Read-only Git & trusted scripts -> ALLOW
@@ -382,7 +426,7 @@ gd "gh deny: chained 2nd segment" SAFETY_GITHUB_MUTATION_DENIED \
 
 while IFS= read -r c; do
   [ -n "$c" ] || continue
-  ga "read-only git allowed: $c" "issue" "$G_SH" "$(fx_bash_input "$c")"
+  ga "read-only git allowed: $c" "$RM" "$G_SH" "$(fx_bash_input "$c")"
 done <<'ROK'
 git status
 git status --porcelain=v2 -z
@@ -414,7 +458,7 @@ ROK
 
 while IFS= read -r c; do
   [ -n "$c" ] || continue
-  ga "trusted script allowed: $c" "issue" "$G_SH" "$(fx_bash_input "$c")"
+  ga "trusted script allowed: $c" "$RM" "$G_SH" "$(fx_bash_input "$c")"
 done <<SCR
 bash .claude/scripts/issue-contract.sh validate issue.md
 bash .claude/scripts/issue-contract.sh contract -
@@ -439,7 +483,7 @@ SCR
 
 while IFS= read -r c; do
   [ -n "$c" ] || continue
-  gd "trusted-script arg abuse: $c" SAFETY_SHELL_COMMAND_DENIED "issue" "$G_SH" "$(fx_bash_input "$c")"
+  gd "trusted-script arg abuse: $c" SAFETY_SHELL_COMMAND_DENIED "$RM" "$G_SH" "$(fx_bash_input "$c")"
 done <<ABUSE
 bash .claude/scripts/verify.sh --mode worktree --record .claude/x.json
 bash .claude/scripts/verify.sh --mode worktree --record=/tmp/x
@@ -458,24 +502,23 @@ bash .claude/scripts/verify.sh --mode worktree --base-commit zzz
 bash .claude/scripts/verify.sh --mode bogus
 ABUSE
 gd "trusted-script arg abuse: run-id with space" SAFETY_SHELL_COMMAND_DENIED \
-  "issue" "$G_SH" "$(fx_bash_input 'bash .claude/scripts/verify.sh --mode worktree --run-id a b')"
+  "$RM" "$G_SH" "$(fx_bash_input 'bash .claude/scripts/verify.sh --mode worktree --run-id a b')"
 gd "trusted-script: bash with no script" SAFETY_SHELL_COMMAND_DENIED \
-  "issue" "$G_SH" "$(fx_bash_input 'bash')"
+  "$RM" "$G_SH" "$(fx_bash_input 'bash')"
 gd "trusted-script: bash -s" SAFETY_SHELL_COMMAND_DENIED \
-  "issue" "$G_SH" "$(fx_bash_input 'bash -s .claude/tests/run.sh')"
+  "$RM" "$G_SH" "$(fx_bash_input 'bash -s .claude/tests/run.sh')"
 
 # ========================================================================
 # 6c. verify.sh is NEVER on the Claude Bash allowlist (Review Correction
-#     Round 1). Every invocation — bare, --record, or any other argument —
-#     is SAFETY_SHELL_COMMAND_DENIED, in both workflow modes.
+#     Round 1). In orchestrator mode every invocation — bare, --record, or any
+#     other argument — is SAFETY_SHELL_COMMAND_DENIED. (Outside orchestrator mode
+#     it passes through: see section 1b.)
 # ========================================================================
 
 while IFS= read -r c; do
   [ -n "$c" ] || continue
-  gd "verify.sh not Bash-allowlisted (issue): $c" SAFETY_SHELL_COMMAND_DENIED \
-    "issue" "$G_SH" "$(fx_bash_input "$c")"
-  gd "verify.sh not Bash-allowlisted (maintenance): $c" SAFETY_SHELL_COMMAND_DENIED \
-    "framework-maintenance" "$G_SH" "$(fx_bash_input "$c")"
+  gd "verify.sh not Bash-allowlisted (orchestrator): $c" SAFETY_SHELL_COMMAND_DENIED \
+    "$RM" "$G_SH" "$(fx_bash_input "$c")"
 done <<VERIFY
 bash .claude/scripts/verify.sh
 bash .claude/scripts/verify.sh --mode worktree
@@ -496,7 +539,7 @@ VERIFY
 
 while IFS= read -r c; do
   [ -n "$c" ] || continue
-  ga "workflow-state read-only allowed: $c" "issue" "$G_SH" "$(fx_bash_input "$c")"
+  ga "workflow-state read-only allowed: $c" "$RM" "$G_SH" "$(fx_bash_input "$c")"
 done <<WFSOK
 bash .claude/scripts/workflow-state.sh validate
 bash .claude/scripts/workflow-state.sh status
@@ -512,7 +555,7 @@ WFSOK
 while IFS= read -r c; do
   [ -n "$c" ] || continue
   gd "workflow-state mutation/abuse denied: $c" SAFETY_SHELL_COMMAND_DENIED \
-    "issue" "$G_SH" "$(fx_bash_input "$c")"
+    "$RM" "$G_SH" "$(fx_bash_input "$c")"
 done <<WFSBAD
 bash .claude/scripts/workflow-state.sh init --run-id r --issue-number 17
 bash .claude/scripts/workflow-state.sh transition VERIFY_WORKTREE
@@ -538,14 +581,14 @@ bash .claude/scripts/workflow-state.sh -h
 bash .claude/scripts/workflow-state.sh --help
 WFSBAD
 gd "workflow-state mutation denied (maintenance): transition" SAFETY_SHELL_COMMAND_DENIED \
-  "framework-maintenance" "$G_SH" "$(fx_bash_input 'bash .claude/scripts/workflow-state.sh transition VERIFY_WORKTREE')"
+  "$RM" "$G_SH" "$(fx_bash_input 'bash .claude/scripts/workflow-state.sh transition VERIFY_WORKTREE')"
 
 # --repo-root pointing at a symlink that resolves to the project dir -> ALLOW
 PD_LINK_SRC="$(fx_pdir)"
 LINK_ALIAS="$(mktemp -d "$TEST_TMP_ROOT/rralias.XXXXXX")/plink"
 ln -s "$PD_LINK_SRC" "$LINK_ALIAS"
 ga "trusted-script: --repo-root via equivalent symlink -> allowed" \
-  "issue" "$G_SH" "$(fx_bash_input "bash .claude/scripts/candidate.sh --repo-root $LINK_ALIAS fingerprint")" "$PD_LINK_SRC"
+  "$RM" "$G_SH" "$(fx_bash_input "bash .claude/scripts/candidate.sh --repo-root $LINK_ALIAS fingerprint")" "$PD_LINK_SRC"
 
 # ========================================================================
 # 7. worktree-create-guard.sh — direct offline tests
@@ -559,15 +602,23 @@ wcg_run() {
   [ "$mode" != "-unset-" ] && e+=("OMNIVISE_WORKFLOW_MODE=$mode")
   printf '%s' "$stdin" | "${e[@]}" bash "$SAFETY_HOOKS_DIR/$G_WC"
 }
-# The guard is unconditional: mode, payload shape, and payload content never
-# change the outcome.
-for spec in "issue|{}" "framework-maintenance|{}" "-unset-|{}" "issue|not json at all" "issue|" "bogusmode|{}" "-unset-|" "framework-maintenance|garbage"; do
-  m="${spec%%|*}"; s="${spec#*|}"
-  assert_fail_code "worktree-create-guard deny ($spec)" SAFETY_WORKTREE_LIFECYCLE_DENIED wcg_run "$m" "$s"
+# Issue #67: in orchestrator mode the guard denies for every payload shape and
+# content. In every other mode it exits 0 with nothing on stdout or stderr.
+for s in "{}" "not json at all" "" "garbage payload"; do
+  assert_fail_code "worktree-create-guard deny (orchestrator|$s)" \
+    SAFETY_WORKTREE_LIFECYCLE_DENIED wcg_run "$RM" "$s"
 done
-run_capture wcg_run issue "garbage payload"
-assert_eq "worktree-create-guard: stdout is byte-empty" "" "$OUT"
-assert_ne "worktree-create-guard: exit is non-zero" "0" "$RC"
+run_capture wcg_run "$RM" "garbage payload"
+assert_eq "worktree-create-guard (orchestrator): stdout is byte-empty" "" "$OUT"
+assert_ne "worktree-create-guard (orchestrator): exit is non-zero" "0" "$RC"
+
+for spec in "issue|{}" "framework-maintenance|{}" "-unset-|{}" "issue|not json at all" "-unset-|" "bogusmode|{}" "framework-maintenance|garbage"; do
+  m="${spec%%|*}"; s="${spec#*|}"
+  run_capture wcg_run "$m" "$s"
+  assert_eq "worktree-create-guard pass-through ($spec): exit 0" "0" "$RC"
+  assert_eq "worktree-create-guard pass-through ($spec): stdout empty" "" "$OUT"
+  assert_eq "worktree-create-guard pass-through ($spec): stderr empty" "" "$ERR"
+done
 
 # MIN-5: the guard is standalone — it must not depend on guard-common.sh (or any
 # other shared runtime file) and must still fail closed when copied out alone.
@@ -575,45 +626,60 @@ assert_not_contains "worktree-create-guard: sources no guard-common.sh" \
   "$(cat "$SAFETY_HOOKS_DIR/$G_WC")" "guard-common.sh"
 LONE_WC="$(mktemp -d "$TEST_TMP_ROOT/lonewc.XXXXXX")"
 cp "$SAFETY_HOOKS_DIR/$G_WC" "$LONE_WC/"
-run_capture bash "$LONE_WC/$G_WC" </dev/null
+run_capture env OMNIVISE_WORKFLOW_MODE="$RM" bash "$LONE_WC/$G_WC" </dev/null
 assert_ne "worktree-create-guard: denies as a lone copy (no shared deps)" "0" "$RC"
 assert_eq "worktree-create-guard: lone copy keeps stdout byte-empty" "" "$OUT"
-run_capture bash "$LONE_WC/$G_WC" </dev/null
+run_capture env OMNIVISE_WORKFLOW_MODE="$RM" bash "$LONE_WC/$G_WC" </dev/null
 assert_contains "worktree-create-guard: lone copy still emits the stable code" \
   "$ERR" "SAFETY_WORKTREE_LIFECYCLE_DENIED"
+run_capture env -u OMNIVISE_WORKFLOW_MODE bash "$LONE_WC/$G_WC" </dev/null
+assert_eq "worktree-create-guard: lone copy passes through with the var unset" "0" "$RC"
 
 # ========================================================================
 # 8. guard-common internal-error / input paths
 # ========================================================================
 
+# These internal-error / input-validation paths live below the Issue #67 gate, so
+# they are only reachable in orchestrator mode. The gate itself is proven to win
+# over a broken rule set immediately below.
 LONE="$(mktemp -d "$TEST_TMP_ROOT/lone.XXXXXX")"
 cp "$SAFETY_HOOKS_DIR/$G_FW" "$SAFETY_HOOKS_DIR/$G_SH" "$LONE/"
-lone_fw() { printf '%s' "$1" | env OMNIVISE_WORKFLOW_MODE=issue CLAUDE_PROJECT_DIR="$FX_PD" bash "$LONE/$G_FW"; }
-lone_sh() { printf '%s' "$1" | env OMNIVISE_WORKFLOW_MODE=issue CLAUDE_PROJECT_DIR="$FX_PD" bash "$LONE/$G_SH"; }
+lone_fw() { printf '%s' "$1" | env OMNIVISE_WORKFLOW_MODE="$RM" CLAUDE_PROJECT_DIR="$FX_PD" bash "$LONE/$G_FW"; }
+lone_sh() { printf '%s' "$1" | env OMNIVISE_WORKFLOW_MODE="$RM" CLAUDE_PROJECT_DIR="$FX_PD" bash "$LONE/$G_SH"; }
 assert_fail_code "guard-common unavailable -> framework guard INTERNAL_ERROR" SAFETY_INTERNAL_ERROR \
   lone_fw "$(fwe 'backend/x')"
 assert_fail_code "guard-common unavailable -> shell guard INTERNAL_ERROR" SAFETY_INTERNAL_ERROR \
   lone_sh "$(fx_bash_input 'git status')"
 
-# malformed stdin
+# Issue #67: the pass-through gate is the first statement, ahead of the
+# guard-common.sh source — a lone copy with the var unset still passes through
+# instead of failing SAFETY_INTERNAL_ERROR.
+lone_fw_unset() { printf '%s' "$1" | env -u OMNIVISE_WORKFLOW_MODE CLAUDE_PROJECT_DIR="$FX_PD" bash "$LONE/$G_FW"; }
+lone_sh_unset() { printf '%s' "$1" | env -u OMNIVISE_WORKFLOW_MODE CLAUDE_PROJECT_DIR="$FX_PD" bash "$LONE/$G_SH"; }
+assert_ok "gate wins over a broken rule set -> framework guard passes through" \
+  lone_fw_unset "$(fwe '.claude/settings.json')"
+assert_ok "gate wins over a broken rule set -> shell guard passes through" \
+  lone_sh_unset "$(fx_bash_input 'git commit -m x')"
+
+# malformed stdin (reachable only in orchestrator mode)
 assert_fail_code "framework guard: non-JSON stdin -> INPUT_INVALID" SAFETY_INPUT_INVALID \
-  fx_guard issue "$G_FW" 'not json'
+  fx_guard "$RM" "$G_FW" 'not json'
 assert_fail_code "framework guard: empty stdin -> INPUT_INVALID" SAFETY_INPUT_INVALID \
-  fx_guard issue "$G_FW" ''
+  fx_guard "$RM" "$G_FW" ''
 assert_fail_code "framework guard: {} stdin -> INPUT_INVALID" SAFETY_INPUT_INVALID \
-  fx_guard issue "$G_FW" '{}'
+  fx_guard "$RM" "$G_FW" '{}'
 assert_fail_code "framework guard: tool_input without a path -> INPUT_INVALID" SAFETY_INPUT_INVALID \
-  fx_guard issue "$G_FW" '{"tool_input":{}}'
+  fx_guard "$RM" "$G_FW" '{"tool_input":{}}'
 assert_fail_code "shell guard: non-JSON stdin -> INPUT_INVALID" SAFETY_INPUT_INVALID \
-  fx_guard issue "$G_SH" 'not json'
+  fx_guard "$RM" "$G_SH" 'not json'
 assert_fail_code "framework guard: control char in path -> INPUT_INVALID" SAFETY_INPUT_INVALID \
-  fx_guard issue "$G_FW" "$(jq -cn "{tool_name:\"Edit\",tool_input:{file_path:\"a\u0001b\"}}")"
+  fx_guard "$RM" "$G_FW" "$(jq -cn "{tool_name:\"Edit\",tool_input:{file_path:\"a\u0001b\"}}")"
 
 # required tool missing (jq present for `command -v` but failing) -> fail-closed
 JQ_SHADOW="$(mktemp -d "$TEST_TMP_ROOT/jqshadow.XXXXXX")"
 printf '#!/usr/bin/env bash\nexit 3\n' >"$JQ_SHADOW/jq"
 chmod +x "$JQ_SHADOW/jq"
-shadow_jq_fw() { printf '%s' "$1" | env OMNIVISE_WORKFLOW_MODE=issue CLAUDE_PROJECT_DIR="$FX_PD" PATH="$JQ_SHADOW:$PATH" bash "$SAFETY_HOOKS_DIR/$G_FW"; }
+shadow_jq_fw() { printf '%s' "$1" | env OMNIVISE_WORKFLOW_MODE="$RM" CLAUDE_PROJECT_DIR="$FX_PD" PATH="$JQ_SHADOW:$PATH" bash "$SAFETY_HOOKS_DIR/$G_FW"; }
 assert_fail_code "framework guard: broken jq -> fail-closed SAFETY_" "SAFETY_" \
   shadow_jq_fw "$(fwe 'backend/x')"
 
@@ -698,14 +764,18 @@ gd "orchestrator: verify.sh remains off the allowlist" SAFETY_SHELL_COMMAND_DENI
 gd "orchestrator: workflow-state mutation remains denied" SAFETY_SHELL_COMMAND_DENIED \
   "orchestrator" "$G_SH" "$(fx_bash_input 'bash .claude/scripts/workflow-state.sh transition COMMIT')"
 
-# --- the lifecycle helper and the launcher are never Claude-callable
-for m in issue framework-maintenance orchestrator "-unset-"; do
-  gd "lifecycle.sh direct call denied ($m)" SAFETY_LIFECYCLE_DIRECT_DENIED \
-    "$m" "$G_SH" "$(fx_bash_input 'bash .claude/scripts/lifecycle.sh stage')"
-  gd "lifecycle.sh commit denied ($m)" SAFETY_LIFECYCLE_DIRECT_DENIED \
-    "$m" "$G_SH" "$(fx_bash_input 'bash .claude/scripts/lifecycle.sh commit')"
-  gd "launch-issue.sh direct call denied ($m)" SAFETY_LIFECYCLE_DIRECT_DENIED \
-    "$m" "$G_SH" "$(fx_bash_input 'bash .claude/scripts/launch-issue.sh --issue 19')"
+# --- in orchestrator mode the lifecycle helper and the launcher are never
+#     Claude-callable through the Bash guard. (Outside orchestrator mode the
+#     guard passes through; lifecycle.sh / launch-issue.sh still refuse to run
+#     without their own inherited authority markers — that is their concern, not
+#     this hook's. See section 1b for the pass-through assertions.)
+for c in \
+  'bash .claude/scripts/lifecycle.sh stage' \
+  'bash .claude/scripts/lifecycle.sh commit' \
+  'bash .claude/scripts/launch-issue.sh --issue 19'; do
+  gd "lifecycle/launcher direct call denied (orchestrator): $c" SAFETY_LIFECYCLE_DIRECT_DENIED \
+    "$RM" "$G_SH" "$(fx_bash_input "$c")"
+  gp "pass-through: $c" "$G_SH" "$(fx_bash_input "$c")"
 done
 
 # ========================================================================
@@ -719,18 +789,21 @@ done
 # cannot forge it either.
 # ========================================================================
 
-for m in issue framework-maintenance orchestrator "-unset-"; do
-  while IFS= read -r c; do
-    [ -n "$c" ] || continue
-    gd "human-gate.sh is never Claude-callable ($m): $c" SAFETY_SHELL_COMMAND_DENIED \
-      "$m" "$G_SH" "$(fx_bash_input "$c")"
-  done <<HGATE
+# In orchestrator mode human-gate.sh is on no Bash allowlist, so the orchestrating
+# model cannot run it and cannot approve its own gate. Outside orchestrator mode
+# the Bash guard passes through (section 1b); human-gate.sh then still refuses
+# unless OMNIVISE_HUMAN_GATE_INVOCATION=maintainer is inherited — and it refuses
+# outright when OMNIVISE_WORKFLOW_MODE=orchestrator is inherited.
+while IFS= read -r c; do
+  [ -n "$c" ] || continue
+  gd "human-gate.sh is never Claude-callable (orchestrator): $c" SAFETY_SHELL_COMMAND_DENIED \
+    "$RM" "$G_SH" "$(fx_bash_input "$c")"
+done <<HGATE
 bash .claude/scripts/human-gate.sh approve
 bash .claude/scripts/human-gate.sh reject
 bash .claude/scripts/human-gate.sh --repo-root $FX_PD approve
 sh .claude/scripts/human-gate.sh approve
 HGATE
-done
 gd "human-gate.sh: a chained approval is denied" SAFETY_SHELL_COMMAND_DENIED \
   "orchestrator" "$G_SH" "$(fx_bash_input 'git status && bash .claude/scripts/human-gate.sh approve')"
 gd "human-gate.sh: an env-prefixed invocation marker grants nothing" SAFETY_SHELL_COMMAND_DENIED \
@@ -750,15 +823,16 @@ for t in Write Edit MultiEdit; do
 done
 gd "human-gate.sh is not editable in orchestrator mode" SAFETY_FRAMEWORK_MUTATION_DENIED \
   "orchestrator" "$G_FW" "$(fwe '.claude/scripts/human-gate.sh')"
-gd "human-gate.sh is not editable in issue mode" SAFETY_FRAMEWORK_MUTATION_DENIED \
-  "issue" "$G_FW" "$(fwe '.claude/scripts/human-gate.sh')"
+gp "pass-through: human-gate.sh edit" "$G_FW" "$(fwe '.claude/scripts/human-gate.sh')"
 
-# --- the orchestration entry point: allowed ONLY in orchestrator mode
+# --- the orchestration entry point: the closed event grammar is enforced in
+#     orchestrator mode; outside it, the whole guard passes through (the event is
+#     "allowed" only in the sense that nothing is evaluated).
 while IFS= read -r c; do
   [ -n "$c" ] || continue
   ga "orchestrator entry allowed: $c" "orchestrator" "$G_SH" "$(fx_bash_input "$c")"
   for m in issue framework-maintenance "-unset-"; do
-    gd "orchestrator entry denied ($m): $c" SAFETY_ORCHESTRATOR_AUTHORITY_DENIED \
+    ga "orchestrator entry pass-through ($m): $c" \
       "$m" "$G_SH" "$(fx_bash_input "$c")"
   done
 done <<ORCHOK
@@ -802,21 +876,21 @@ $G_ORCH --code HUMAN_GATE_UNRESOLVED
 sh .claude/scripts/orchestrator.sh push --force
 ORCHBAD
 
-# --- authority never comes from prompt text, branch name, cwd or issue content
+# --- authority is EXACTLY the inherited OMNIVISE_WORKFLOW_MODE env var. Nothing
+#     in the payload, the branch name, the cwd, or an inline / env-prefixed
+#     assignment produces it. Outside orchestrator mode the guard is inert; a
+#     branch called 'orchestrator' does not change that.
 PD_BRANCH="$(fx_pdir)"
 git -C "$PD_BRANCH" checkout -q -b "feat/19-orchestrator"
-gd "authority: a branch called 'orchestrator' grants nothing" SAFETY_ORCHESTRATOR_AUTHORITY_DENIED \
-  "issue" "$G_SH" "$(fx_bash_input "$G_ORCH commit")" "$PD_BRANCH"
-gd "authority: a branch called 'orchestrator' does not unlock git commit" SAFETY_GIT_MUTATION_DENIED \
-  "issue" "$G_SH" "$(fx_bash_input 'git commit -m x')" "$PD_BRANCH"
-gd "authority: payload-supplied mode grants nothing" SAFETY_ORCHESTRATOR_AUTHORITY_DENIED \
-  "issue" "$G_SH" "$(fx_hook_input Bash "$(jq -cn --arg c "$G_ORCH commit" '{mode:"orchestrator", command:$c}')")"
-gd "authority: an inline mode assignment grants nothing" SAFETY_SHELL_COMMAND_DENIED \
-  "issue" "$G_SH" "$(fx_bash_input "OMNIVISE_WORKFLOW_MODE=orchestrator $G_ORCH commit")"
-gd "authority: env-prefixed mode grants nothing" SAFETY_SHELL_COMMAND_DENIED \
-  "issue" "$G_SH" "$(fx_bash_input "env OMNIVISE_WORKFLOW_MODE=orchestrator $G_ORCH commit")"
-gd "authority: a chained orchestrator call in issue mode is denied" SAFETY_ORCHESTRATOR_AUTHORITY_DENIED \
-  "issue" "$G_SH" "$(fx_bash_input "git status && $G_ORCH push")"
+ga "authority: a branch called 'orchestrator' does not activate the guard" \
+  "-unset-" "$G_SH" "$(fx_bash_input 'git commit -m x')" "$PD_BRANCH"
+gd "authority: a payload-supplied mode field is ignored (orchestrator: bad grammar still denied)" \
+  SAFETY_SHELL_COMMAND_DENIED \
+  "$RM" "$G_SH" "$(fx_hook_input Bash "$(jq -cn --arg c "$G_ORCH bogus-event" '{mode:"issue", command:$c}')")"
+gd "authority: an inline mode assignment is a denied construct in orchestrator mode" SAFETY_SHELL_COMMAND_DENIED \
+  "$RM" "$G_SH" "$(fx_bash_input "OMNIVISE_WORKFLOW_MODE=orchestrator $G_ORCH commit")"
+gd "authority: an env-prefixed mode assignment is a denied construct in orchestrator mode" SAFETY_SHELL_COMMAND_DENIED \
+  "$RM" "$G_SH" "$(fx_bash_input "env OMNIVISE_WORKFLOW_MODE=orchestrator $G_ORCH commit")"
 
 # ========================================================================
 # 10. Compatibility / no-mutation / isolation
@@ -826,7 +900,7 @@ gd "authority: a chained orchestrator call in issue mode is denied" SAFETY_ORCHE
 # disposable repo's HEAD and working tree untouched.
 PD_NM="$(fx_pdir)"
 NM_HEAD="$(git -C "$PD_NM" rev-parse HEAD)"
-run_capture fx_guard issue "$G_SH" "$(fx_bash_input 'git commit -m x')" "$PD_NM"
+run_capture fx_guard "$RM" "$G_SH" "$(fx_bash_input 'git commit -m x')" "$PD_NM"
 assert_ne "no-mutation: denied git commit exits non-zero" "0" "$RC"
 assert_eq "no-mutation: disposable repo HEAD unchanged" "$NM_HEAD" "$(git -C "$PD_NM" rev-parse HEAD)"
 assert_eq "no-mutation: disposable repo working tree clean" "" "$(git -C "$PD_NM" status --porcelain)"

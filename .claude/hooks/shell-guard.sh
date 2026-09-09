@@ -24,17 +24,24 @@
 #               any mode.
 #   * anything else -> denied.
 #
-# The grammar and every lifecycle denial are identical in all workflow modes with
-# exactly one exception (Issue #19): in OMNIVISE_WORKFLOW_MODE=orchestrator the
-# single fixed entry point `bash .claude/scripts/orchestrator.sh <event>` is
-# authorized, with a closed event list and no free-form argument. Authority comes
-# only from the inherited environment; nothing about the prompt, the issue, the
-# branch or the working directory can produce it. Direct `git add|commit|push`,
-# branch/worktree mutation and arbitrary `gh` stay denied in orchestrator mode
-# too — the orchestration events are the only route to a lifecycle action.
+# Issue #67: this guard is INERT unless OMNIVISE_WORKFLOW_MODE=orchestrator. That
+# mode is set by .claude/scripts/launch-issue.sh for a deterministic orchestrated
+# run and inherited by every dispatched subagent and command-hook invocation. In
+# every other session (interactive maintainer work; the variable unset, empty, or
+# any other value) the guard exits 0 immediately and imposes nothing — safety
+# then rests on maintainer discipline.
 #
-# mode_effective runs first so a malformed OMNIVISE_WORKFLOW_MODE fails as
-# SAFETY_MODE_INVALID uniformly.
+# On the orchestrator path the policy below is unchanged: the read-only git
+# grammar and every lifecycle denial apply, with one Issue #19 exception — the
+# single fixed entry point `bash .claude/scripts/orchestrator.sh <event>` is
+# authorized, with a closed event list and no free-form argument. Direct
+# `git add|commit|push`, branch/worktree mutation and arbitrary `gh` stay denied
+# on that path too — the orchestration events are the only route to a lifecycle
+# action.
+#
+# The pass-through check is the first statement, before guard-common.sh is even
+# sourced, so a malformed or missing rule set can never re-enable restriction in
+# an interactive session.
 #
 # On deny: "<CODE>: <reason>" on stderr, empty stdout, exit 2. On allow: silent
 # exit 0. Reason strings never echo the whole command or a positional value.
@@ -42,6 +49,11 @@
 # Invoked as: bash "${CLAUDE_PROJECT_DIR}/.claude/hooks/shell-guard.sh"
 
 set -euo pipefail
+
+# Issue #67 pass-through gate — first statement, before any sourcing or rule
+# evaluation. The fail-closed boundary applies only to the deterministic
+# orchestrated workflow.
+[ "${OMNIVISE_WORKFLOW_MODE-}" = "orchestrator" ] || exit 0
 
 _here="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || _here=""
 if [ -z "$_here" ] || [ ! -f "$_here/guard-common.sh" ]; then
