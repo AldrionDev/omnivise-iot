@@ -51,9 +51,16 @@ Modern smart homes generate vast amounts of unstructured telemetry data. This pr
 ├── /simulators     # Java IoT device emulators
 ├── /terraform      # IaC: AWS VPC, EKS, and MongoDB clusters
 ├── /k8s            # Kubernetes manifests (Deployments, Services, HPA)
-└── /docker         # Multi-stage Dockerfiles & Docker Compose
+├── /docker         # Multi-stage Dockerfiles & Docker Compose
+└── /.claude        # Issue-driven engineering workflow (agents, scripts, hooks)
 
 ```
+
+The `.claude/` directory holds an issue-driven engineering workflow. Its safety
+hooks are fail-closed only for the deterministic orchestrated workflow
+(`OMNIVISE_WORKFLOW_MODE=orchestrator`); in ordinary interactive sessions they
+are inert and safety rests on maintainer discipline. See
+[`docs/development-workflow.md`](docs/development-workflow.md#safety-guard-hooks).
 
 ---
 

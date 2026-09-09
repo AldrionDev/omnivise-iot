@@ -183,19 +183,19 @@ assert_fail "validate_agent_definition rejects a fixture with an extra frontmatt
 
 # ========================================================================
 # 5. Real Issue #17 hook integration: the three agent files' own paths must
-#    be classified "framework" by the actual framework-write-guard.sh, i.e.
-#    the safety boundary already introduced by #17 treats .claude/agents/**
-#    as framework-maintenance content, denied in issue mode, allowed only
-#    under OMNIVISE_WORKFLOW_MODE=framework-maintenance.
+#    be classified "framework" by the actual framework-write-guard.sh. Since
+#    Issue #67 the guard enforces this only when
+#    OMNIVISE_WORKFLOW_MODE=orchestrator; in any other session the write passes
+#    through (that pass-through is covered by the safety-guard suite).
 # ========================================================================
 
-assert_fail_code "framework-write-guard denies a write into .claude/agents/planner.md in issue mode" \
+assert_fail_code "framework-write-guard denies a write into .claude/agents/planner.md in orchestrator mode" \
   SAFETY_FRAMEWORK_MUTATION_DENIED \
-  fx_guard "issue" "framework-write-guard.sh" "$(fx_edit_input '.claude/agents/planner.md' Write)"
+  fx_guard "orchestrator" "framework-write-guard.sh" "$(fx_edit_input '.claude/agents/planner.md' Write)"
 
-assert_ok "framework-write-guard allows a write into .claude/agents/planner.md in framework-maintenance mode" \
-  fx_guard "framework-maintenance" "framework-write-guard.sh" "$(fx_edit_input '.claude/agents/planner.md' Write)"
+assert_ok "framework-write-guard passes through a write into .claude/agents/planner.md outside orchestrator mode" \
+  fx_guard "-unset-" "framework-write-guard.sh" "$(fx_edit_input '.claude/agents/planner.md' Write)"
 
-assert_fail_code "framework-write-guard denies a write into .claude/tests/agents_test.sh in issue mode" \
+assert_fail_code "framework-write-guard denies a write into .claude/tests/agents_test.sh in orchestrator mode" \
   SAFETY_FRAMEWORK_MUTATION_DENIED \
-  fx_guard "issue" "framework-write-guard.sh" "$(fx_edit_input '.claude/tests/agents_test.sh' Edit)"
+  fx_guard "orchestrator" "framework-write-guard.sh" "$(fx_edit_input '.claude/tests/agents_test.sh' Edit)"
