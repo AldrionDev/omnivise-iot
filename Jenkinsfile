@@ -1,20 +1,24 @@
-// OmniVise IoT homelab delivery pipeline — exact-SHA image build and homelab
-// registry publication boundary only (Homelab Delivery milestone, issue #60).
+// OmniVise IoT homelab delivery pipeline — exact-SHA image build, homelab
+// registry publication, and a gated Terraform deployment to the homelab k3s
+// target (Homelab Delivery milestone, issues #60 and #61).
 //
 // Flow: checkout / identify revision -> homelab preflight -> write-once
 // release-set precheck -> (BUILD path only) build all three images once ->
 // publish all three exact-SHA tags with post-push Registry V2 digest
-// verification. The pipeline ends after publication / reuse verification.
+// verification -> Terraform init / validate / fmt-check against infra/homelab
+// -> one saved Terraform plan -> pre-approval evidence -> human approval gate
+// -> apply of that exact saved plan. The pipeline ends immediately after a
+// successful terraform apply.
 //
 // Explicitly NOT in this milestone (see
-// docs/architecture/delivery-architecture.md): Terraform init/plan/apply, the
-// human approval gate, any Kubernetes read or write, post-deploy smoke, HCP
-// credentials, kubeconfig binding, GHCR, AWS / EKS / ECR, GitHub-to-AWS OIDC,
+// docs/architecture/delivery-architecture.md): any post-deploy smoke, kubectl
+// readiness / workload-image / HTTP / WebSocket / MongoDB replica-health
+// verification, rollback automation, GHCR, AWS / EKS / ECR, GitHub-to-AWS OIDC,
 // and image signing / SBOM / policy tooling. A future AWS target adds `aws` /
-// `both` to DEPLOY_TARGET and a parallel GHCR publication branch alongside the
-// homelab one; it must extend this file, not rewrite the homelab path. There is
-// no separate PUSH_TARGET parameter — DEPLOY_TARGET alone will control both
-// publication and deployment once more targets exist.
+// `both` to DEPLOY_TARGET and a parallel GHCR publication branch plus a second
+// Terraform root / HCP workspace alongside the homelab one; it must extend this
+// file, not rewrite the homelab path. There is no separate PUSH_TARGET
+// parameter — DEPLOY_TARGET alone controls both publication and deployment.
 //
 // This repository owns build + publication intent only. The Jenkins runtime,
 // the shared `homelab-preflight` capability, and the local homelab registry
@@ -48,10 +52,13 @@ pipeline {
         disableConcurrentBuilds()
         // No global pipeline timeout: every stage below carries its own bounded
         // timeout, so the pipeline still always fails closed instead of
-        // hanging, without an outer clock that could expire mid-build or
-        // mid-publish. (No human-approval window exists in this milestone; the
-        // per-stage model is kept for forward consistency with the reference
-        // pipeline.)
+        // hanging, without an outer clock that could expire mid-build,
+        // mid-publish, mid-apply, or — worst — while a human is deciding at the
+        // approval gate. The Terraform plan and apply steps are each bounded on
+        // their own; the approval `input` deliberately carries no timeout
+        // (delivery-architecture sections 13 and 20: no clock may race the
+        // human-approval window, and neither the architecture nor the reference
+        // pipeline mandates one here).
         // No timestamps() / cleanWs(): not part of the confirmed
         // local-jenkins-platform plugin baseline. Workspace cleanup below uses
         // Pipeline-native deleteDir().
@@ -64,6 +71,22 @@ pipeline {
         // Canonical registry repository prefix; the component segment
         // (backend | frontend | simulator) is appended per image.
         IMAGE_REPO = 'omnivise-iot'
+
+        // Terraform root for the homelab target. One literal HCP Terraform
+        // workspace per target (delivery-architecture sections 11 and 24); the
+        // workspace name "omnivise-iot-k8s" and HCP Local execution mode are
+        // pinned by the cloud block in infra/homelab/versions.tf.
+        // TF_CLOUD_ORGANIZATION is supplied by the local-jenkins-platform
+        // container environment and is never committed here.
+        TF_ROOT = 'infra/homelab'
+
+        // Documented least-privilege homelab deployer kubeconfig context
+        // (docs/homelab-deployment-smoke.md sections 7-8; delivery-architecture
+        // section 14). Not a secret. Passed to Terraform as
+        // var.kubernetes_context and frozen into the saved plan, so the approved
+        // plan applies against exactly this identity. The onboarded
+        // k3s-omnivise-iot Secret File credential must define this context.
+        TF_VAR_kubernetes_context = 'omnivise-iot-deployer'
     }
 
     stages {
@@ -278,8 +301,11 @@ pipeline {
         stage('Release set ready') {
             options { timeout(time: 1, unit: 'MINUTES') }
             steps {
-                // Scope boundary: this milestone ends here. No Terraform, no
-                // approval, no Kubernetes, no post-deploy smoke.
+                // The exact-SHA release set is now available (built and
+                // published, or reused). The gated Terraform deployment below
+                // consumes exactly these three image references. No post-deploy
+                // smoke runs in this milestone — the pipeline stops right after
+                // terraform apply.
                 script {
                     if (env.RELEASE_ACTION == 'REUSE') {
                         echo "REUSE: all three omnivise-iot exact-SHA images already present for ${env.GIT_SHA}; build and push skipped."
@@ -289,10 +315,153 @@ pipeline {
                 }
             }
         }
+
+        stage('Terraform init & validate') {
+            options { timeout(time: 10, unit: 'MINUTES') }
+            steps {
+                dir(env.TF_ROOT) {
+                    // terraform init needs the HCP token to configure the cloud
+                    // backend (workspace omnivise-iot-k8s, HCP Local execution).
+                    // TF_CLOUD_ORGANIZATION comes from the container
+                    // environment. No kubeconfig is bound here — init, validate
+                    // and fmt-check do not contact the cluster.
+                    withCredentials([
+                        string(credentialsId: 'hcp-terraform-cli', variable: 'TF_TOKEN_app_terraform_io')
+                    ]) {
+                        // Order per delivery-architecture section 10. init is
+                        // non-interactive and treats the committed
+                        // .terraform.lock.hcl as read-only, so lock drift fails
+                        // the build instead of being silently rewritten
+                        // (docs/homelab-deployment-smoke.md section 6). fmt uses
+                        // the repository-supported recursive form from that same
+                        // section.
+                        sh '''
+                            set -eu
+                            set +x
+                            terraform init -input=false -lockfile=readonly
+                            terraform validate
+                            terraform fmt -check -recursive ..
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Homelab deploy (plan, approve, apply)') {
+            steps {
+                dir(env.TF_ROOT) {
+                    // ONE k3s-omnivise-iot Secret File binding spans plan ->
+                    // pre-approval evidence -> human approval -> saved-plan
+                    // apply. The kubernetes provider resolves its kubeconfig
+                    // from var.kubeconfig_path, whose concrete temporary path is
+                    // frozen into the saved plan; re-binding the file for apply
+                    // would place the kubeconfig at a different temp path and
+                    // break `terraform apply tfplan`. Least-privilege deployer
+                    // identity only — never an admin kubeconfig, never a
+                    // cluster-admin fallback, never exposed outside this stage
+                    // (delivery-architecture section 14).
+                    withCredentials([
+                        file(credentialsId: 'k3s-omnivise-iot', variable: 'KUBECONFIG')
+                    ]) {
+                        // Plan. The HCP token is bound only around plan creation
+                        // and released before the human wait — applying a saved
+                        // plan ignores TF_VAR_* for already-planned values and
+                        // only needs the token again to write state and hold the
+                        // state lock.
+                        withCredentials([
+                            string(credentialsId: 'hcp-terraform-cli', variable: 'TF_TOKEN_app_terraform_io')
+                        ]) {
+                            timeout(time: 10, unit: 'MINUTES') {
+                                sh '''
+                                    set -eu
+                                    set +x
+                                    # The three exact-SHA refs frozen in
+                                    # 'Checkout & identify revision' — passed
+                                    # verbatim, never recomputed, never
+                                    # re-queried. var.kubernetes_context comes
+                                    # from the declarative environment block.
+                                    export TF_VAR_kubeconfig_path="$KUBECONFIG"
+                                    export TF_VAR_backend_image_ref="$BACKEND_IMAGE"
+                                    export TF_VAR_frontend_image_ref="$FRONTEND_IMAGE"
+                                    export TF_VAR_simulator_image_ref="$SIMULATOR_IMAGE"
+                                    # tfplan can embed the temporary kubeconfig
+                                    # path and other sensitive values — restrict
+                                    # its mode from creation (umask) and again
+                                    # explicitly (chmod).
+                                    umask 077
+                                    terraform plan -input=false -lock-timeout=120s -out=tfplan
+                                    chmod 600 tfplan
+                                '''
+                            }
+
+                            // Pre-approval evidence: the release identity the
+                            // operator is approving plus a read-only render of
+                            // the exact saved plan. No second plan is created.
+                            timeout(time: 5, unit: 'MINUTES') {
+                                sh '''
+                                    set -eu
+                                    set +x
+                                    echo "OmniVise homelab delivery — pre-approval evidence"
+                                    echo "  Git SHA:         $GIT_SHA"
+                                    echo "  DEPLOY_TARGET:   $DEPLOY_TARGET"
+                                    echo "  Backend image:   $BACKEND_IMAGE"
+                                    echo "  Frontend image:  $FRONTEND_IMAGE"
+                                    echo "  Simulator image: $SIMULATOR_IMAGE"
+                                    echo "  Terraform root:  infra/homelab"
+                                    echo "  HCP workspace:   omnivise-iot-k8s"
+                                    echo "  Saved plan:      infra/homelab/tfplan"
+                                    echo
+                                    echo "Saved Terraform plan (read-only; this exact plan is what apply consumes):"
+                                    terraform show -no-color tfplan
+                                '''
+                            }
+                        }
+
+                        // Human approval gate — after the saved plan and its
+                        // evidence, before any apply. Approving authorises
+                        // applying THIS saved plan for THIS Git SHA and THESE
+                        // image refs. No automatic approval; no timeout (see the
+                        // options block).
+                        input(
+                            message: "Apply the exact saved Terraform plan infra/homelab/tfplan to the OmniVise homelab k3s target?\n" +
+                                     "DEPLOY_TARGET: homelab   HCP workspace: omnivise-iot-k8s\n" +
+                                     "Git SHA:   ${env.GIT_SHA}\n" +
+                                     "backend:   ${env.BACKEND_IMAGE}\n" +
+                                     "frontend:  ${env.FRONTEND_IMAGE}\n" +
+                                     "simulator: ${env.SIMULATOR_IMAGE}",
+                            ok: 'Apply saved plan'
+                        )
+
+                        // Apply the SAVED plan only — no re-plan, no TF_VAR_*
+                        // re-supplied for planned values. Only the HCP token is
+                        // re-bound, to write state and hold the state lock.
+                        withCredentials([
+                            string(credentialsId: 'hcp-terraform-cli', variable: 'TF_TOKEN_app_terraform_io')
+                        ]) {
+                            timeout(time: 15, unit: 'MINUTES') {
+                                sh '''
+                                    set -eu
+                                    set +x
+                                    terraform apply -input=false -lock-timeout=120s tfplan
+                                '''
+                            }
+                        }
+                        // Stage boundary: the pipeline ends here on a successful
+                        // apply. No kubectl, no readiness / image / HTTP /
+                        // WebSocket / MongoDB verification — that is the next
+                        // issue.
+                    }
+                }
+            }
+        }
     }
 
     post {
         always {
+            // The saved Terraform plan can embed the temporary kubeconfig path
+            // and other sensitive values — remove it explicitly before the
+            // workspace is wiped; it is never stashed or archived.
+            sh 'rm -f "$TF_ROOT/tfplan" || true'
             // Pipeline-native workspace cleanup only. This never touches the
             // registry: published exact-SHA tags are write-once and are not
             // deleted here or anywhere in this pipeline.
