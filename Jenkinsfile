@@ -1,24 +1,30 @@
 // OmniVise IoT homelab delivery pipeline — exact-SHA image build, homelab
-// registry publication, and a gated Terraform deployment to the homelab k3s
-// target (Homelab Delivery milestone, issues #60 and #61).
+// registry publication, a gated Terraform deployment to the homelab k3s
+// target, and bounded non-destructive post-deploy smoke verification
+// (Homelab Delivery milestone, issues #60, #61 and #62).
 //
 // Flow: checkout / identify revision -> homelab preflight -> write-once
 // release-set precheck -> (BUILD path only) build all three images once ->
 // publish all three exact-SHA tags with post-push Registry V2 digest
 // verification -> Terraform init / validate / fmt-check against infra/homelab
 // -> one saved Terraform plan -> pre-approval evidence -> human approval gate
-// -> apply of that exact saved plan. The pipeline ends immediately after a
-// successful terraform apply.
+// -> apply of that exact saved plan -> post-deploy smoke (bounded, read-only:
+// workload readiness, exact running-image equality, ResourceQuota
+// compatibility, canonical HTTP reachability, a fresh-event WebSocket data-path
+// proof, and a deployer-safe MongoDB rs0 health signal). A failed apply or an
+// aborted approval interrupts the pipeline before the smoke stage starts.
 //
 // Explicitly NOT in this milestone (see
-// docs/architecture/delivery-architecture.md): any post-deploy smoke, kubectl
-// readiness / workload-image / HTTP / WebSocket / MongoDB replica-health
-// verification, rollback automation, GHCR, AWS / EKS / ECR, GitHub-to-AWS OIDC,
-// and image signing / SBOM / policy tooling. A future AWS target adds `aws` /
-// `both` to DEPLOY_TARGET and a parallel GHCR publication branch plus a second
-// Terraform root / HCP workspace alongside the homelab one; it must extend this
-// file, not rewrite the homelab path. There is no separate PUSH_TARGET
-// parameter — DEPLOY_TARGET alone controls both publication and deployment.
+// docs/architecture/delivery-architecture.md): the destructive #40 MongoDB
+// pod-recreation persistence proof (delivery-architecture section 18),
+// rollback automation, GHCR, AWS / EKS / ECR, GitHub-to-AWS OIDC, and image
+// signing / SBOM / policy tooling. The post-deploy smoke never mutates the
+// cluster, the application, MongoDB, the registry or Terraform state. A future
+// AWS target adds `aws` / `both` to DEPLOY_TARGET and a parallel GHCR
+// publication branch plus a second Terraform root / HCP workspace alongside the
+// homelab one; it must extend this file, not rewrite the homelab path. There is
+// no separate PUSH_TARGET parameter — DEPLOY_TARGET alone controls both
+// publication and deployment.
 //
 // This repository owns build + publication intent only. The Jenkins runtime,
 // the shared `homelab-preflight` capability, and the local homelab registry
@@ -87,6 +93,15 @@ pipeline {
         // plan applies against exactly this identity. The onboarded
         // k3s-omnivise-iot Secret File credential must define this context.
         TF_VAR_kubernetes_context = 'omnivise-iot-deployer'
+
+        // Post-deploy smoke targets (issue #62). These literals mirror the
+        // Terraform source of truth: KUBE_NAMESPACE is local.namespace in
+        // infra/homelab/locals.tf and INGRESS_HOST is the var.ingress_host
+        // default in infra/homelab/variables.tf. Jenkins cannot import Terraform
+        // locals and kubectl needs a literal namespace, so they are restated
+        // once here rather than scattered as inline literals in the smoke stage.
+        KUBE_NAMESPACE = 'omnivise-iot'
+        INGRESS_HOST   = 'omnivise-iot.homelab.home.arpa'
     }
 
     stages {
@@ -303,9 +318,9 @@ pipeline {
             steps {
                 // The exact-SHA release set is now available (built and
                 // published, or reused). The gated Terraform deployment below
-                // consumes exactly these three image references. No post-deploy
-                // smoke runs in this milestone — the pipeline stops right after
-                // terraform apply.
+                // consumes exactly these three image references, and the
+                // post-deploy smoke stage afterwards verifies that exactly
+                // these refs are the ones running.
                 script {
                     if (env.RELEASE_ACTION == 'REUSE') {
                         echo "REUSE: all three omnivise-iot exact-SHA images already present for ${env.GIT_SHA}; build and push skipped."
@@ -446,11 +461,279 @@ pipeline {
                                 '''
                             }
                         }
-                        // Stage boundary: the pipeline ends here on a successful
-                        // apply. No kubectl, no readiness / image / HTTP /
-                        // WebSocket / MongoDB verification — that is the next
-                        // issue.
+                        // Stage boundary: a successful apply hands off to the
+                        // 'Post-deploy smoke (non-destructive)' stage below.
+                        // A failed apply fails the pipeline here and an aborted
+                        // approval interrupts it above, so in both cases the
+                        // smoke stage never starts.
                     }
+                }
+            }
+        }
+
+        stage('Post-deploy smoke (non-destructive)') {
+            // Declarative pipeline only runs this stage when every earlier stage
+            // succeeded, so it is reached exclusively after a successful
+            // `terraform apply` (a failed apply fails the run; an aborted
+            // approval interrupts it). Every check here is read-only against
+            // both the cluster and the application: bounded `kubectl get` on
+            // named resources, HTTP GET, and a WebSocket subscribe/listen.
+            // There is no kubectl apply/patch/delete/create, no rollout
+            // restart, no scale, no pod deletion, no database write, and no
+            // Terraform or registry mutation. This closes the non-destructive
+            // part of the #40 manual evidence loop (delivery-architecture
+            // section 17); the destructive #40 MongoDB pod-recreation
+            // persistence proof is deliberately NOT reproduced (section 18).
+            options { timeout(time: 25, unit: 'MINUTES') }
+            steps {
+                // Cluster-facing checks reuse the SAME least-privilege
+                // k3s-omnivise-iot Secret File credential as plan/apply, bound
+                // only for this block and pinned to the omnivise-iot-deployer
+                // context. Never an admin kubeconfig, never a cluster-admin
+                // fallback, never exposed outside this stage. The deployer RBAC
+                // has no pod list/watch and no exec/port-forward, so every read
+                // below targets a single named resource — never `kubectl get
+                // pods`, never a namespace- or cluster-wide list.
+                withCredentials([
+                    file(credentialsId: 'k3s-omnivise-iot', variable: 'KUBECONFIG')
+                ]) {
+                    timeout(time: 12, unit: 'MINUTES') {
+                        sh '''
+                            set -eu
+                            set +x
+
+                            kc() {
+                                kubectl --kubeconfig "$KUBECONFIG" \
+                                    --context "$TF_VAR_kubernetes_context" \
+                                    --request-timeout=15s -n "$KUBE_NAMESPACE" "$@"
+                            }
+
+                            # --- Bounded workload readiness ------------------
+                            # Single-resource reads only. Ready = all desired
+                            # replicas Ready AND the controller has observed the
+                            # current spec generation. A redeploy of an
+                            # already-live commit is a valid Terraform no-op and
+                            # still passes immediately.
+                            deadline=$(( $(date +%s) + 600 ))
+
+                            wait_ready() {
+                                kind="$1"; name="$2"
+                                while :; do
+                                    out=$(kc get "$kind/$name" \
+                                        -o jsonpath='{.spec.replicas}/{.status.readyReplicas}/{.status.observedGeneration}/{.metadata.generation}' \
+                                        2>/dev/null || echo "")
+                                    desired=$(echo "$out" | cut -d/ -f1)
+                                    ready=$(echo "$out"   | cut -d/ -f2)
+                                    seen=$(echo "$out"    | cut -d/ -f3)
+                                    gen=$(echo "$out"     | cut -d/ -f4)
+                                    if [ -n "$out" ] && [ -n "$ready" ] \
+                                        && [ "$desired" = "$ready" ] \
+                                        && [ "$seen" = "$gen" ]; then
+                                        echo "$kind/$name: Ready ($ready/$desired)"
+                                        return 0
+                                    fi
+                                    if [ "$(date +%s)" -ge "$deadline" ]; then
+                                        echo "$kind/$name: not Ready within the bounded wait (last: '${out:-<none>}')" >&2
+                                        return 1
+                                    fi
+                                    sleep 5
+                                done
+                            }
+
+                            # MongoDB rs0 health without exec/port-forward: the
+                            # StatefulSet readiness probe is
+                            # `db.hello().isWritablePrimary`, so a Ready
+                            # mongodb-0 means the sole rs0 member currently
+                            # reports a writable PRIMARY. Issue #62 / runbook
+                            # section 15 reserve a direct `rs.status()` for the
+                            # separate operator identity; this pipeline must not
+                            # add exec/port-forward to the deployer, and the
+                            # fresh-event WebSocket check below is the
+                            # end-to-end confirmation that rs0 is actually
+                            # serving Change Stream traffic.
+                            wait_ready statefulset mongodb
+                            wait_ready deployment  backend
+                            wait_ready deployment  frontend
+                            wait_ready deployment  sensor-simulator
+
+                            # --- Exact running-image verification -----------
+                            # The live workload templates must run exactly the
+                            # frozen release refs from 'Checkout & identify
+                            # revision'. Deployed state is the proof, never
+                            # registry state; the container-name jsonpath filter
+                            # skips the mongodb-wait init container.
+                            assert_image() {
+                                dep="$1"; container="$2"; expected="$3"
+                                live=$(kc get "deployment/$dep" \
+                                    -o jsonpath="{.spec.template.spec.containers[?(@.name==\\"$container\\")].image}" \
+                                    2>/dev/null || echo "")
+                                if [ -z "$live" ]; then
+                                    echo "$dep: could not read the running image for container '$container'" >&2
+                                    exit 1
+                                fi
+                                case "$live" in
+                                    *:latest)
+                                        echo "$dep: running image uses a :latest tag ($live)" >&2
+                                        exit 1 ;;
+                                esac
+                                if [ "$live" != "$expected" ]; then
+                                    echo "$dep: image mismatch: live=$live expected=$expected" >&2
+                                    exit 1
+                                fi
+                                echo "$dep: running image verified ($live)"
+                            }
+
+                            assert_image backend          backend          "$BACKEND_IMAGE"
+                            assert_image frontend         frontend         "$FRONTEND_IMAGE"
+                            assert_image sensor-simulator sensor-simulator "$SIMULATOR_IMAGE"
+
+                            # --- ResourceQuota compatibility (read-only) ----
+                            # The omnivise-iot ResourceQuota object is owned by
+                            # homelab-platform#41 and, per runbook section 23, is
+                            # readable only with the separate operator identity;
+                            # the least-privilege deployer cannot read it and
+                            # this issue does not widen that RBAC. The strongest
+                            # least-privilege-safe evidence is that every
+                            # workload above was admitted and reached its desired
+                            # Ready replica count within the bounded wait: a pod
+                            # rejected by the namespace ResourceQuota never
+                            # becomes Ready, and `terraform apply` itself already
+                            # succeeded. Re-assert that end state explicitly.
+                            for target in statefulset/mongodb deployment/backend deployment/frontend deployment/sensor-simulator; do
+                                qout=$(kc get "$target" -o jsonpath='{.spec.replicas}/{.status.readyReplicas}' 2>/dev/null || echo "")
+                                if [ -z "$qout" ] || [ "$(echo "$qout" | cut -d/ -f1)" != "$(echo "$qout" | cut -d/ -f2)" ]; then
+                                    echo "$target: not at desired Ready replicas ($qout) — cannot confirm ResourceQuota compatibility" >&2
+                                    exit 1
+                                fi
+                            done
+                            echo "ResourceQuota compatibility: PASS (indirect — all workloads admitted and Ready, no quota rejection; a direct ResourceQuota object read is not available to the least-privilege omnivise-iot-deployer identity and RBAC is not widened here)."
+                        '''
+                    }
+                }
+
+                // --- Canonical HTTP smoke --------------------------------
+                // No kubeconfig needed. Bounded. Proves the public Traefik
+                // route reaches the deployed application, not merely that
+                // Traefik accepts TCP: `/` must return the frontend SPA shell
+                // and `/api/sensors/latest` must return a JSON array proxied
+                // frontend -> backend. Both are harmless reads defined in
+                // frontend/nginx.conf and
+                // backend/src/main/java/com/omnivise/Main.java.
+                timeout(time: 3, unit: 'MINUTES') {
+                    sh '''
+                        set -eu
+                        set +x
+
+                        base="http://$INGRESS_HOST"
+                        deadline=$(( $(date +%s) + 120 ))
+
+                        # One response-body scratch file for the whole HTTP
+                        # smoke. The EXIT trap removes it on every exit path —
+                        # success, curl failure, the Jenkins timeout
+                        # interrupting the shell, and any set -e failure — the
+                        # same pattern the 'Publish images' stage uses. curl -o
+                        # overwrites it each iteration, so one file suffices.
+                        tmp=$(mktemp)
+                        trap 'rm -f "$tmp"' EXIT
+
+                        get_ok() {
+                            path="$1"; needle="$2"
+                            while :; do
+                                code=$(curl -sS -m 10 -o "$tmp" -w '%{http_code}' "$base$path" 2>/dev/null || echo "000")
+                                if [ "$code" = "200" ] && grep -q "$needle" "$tmp"; then
+                                    echo "GET $path -> 200 (matched /$needle/)"
+                                    return 0
+                                fi
+                                if [ "$(date +%s)" -ge "$deadline" ]; then
+                                    echo "GET $path: no matching 200 within the bounded wait (last code: $code)" >&2
+                                    return 1
+                                fi
+                                sleep 5
+                            done
+                        }
+
+                        get_ok "/" 'id="root"'
+                        get_ok "/api/sensors/latest?limit=1" '^\\['
+                    '''
+                }
+
+                // --- WebSocket fresh-event data-path smoke ---------------
+                // Proves the full simulator -> MongoDB rs0 -> Change Stream ->
+                // backend -> /ws/sensors -> Traefik path, not just a WebSocket
+                // handshake: it subscribes to the real public route and
+                // requires a sensor event delivered DURING the connection
+                // window (the backend broadcasts only to already-connected
+                // clients), validated as a structurally valid OmniVise sensor
+                // reading. Read-only — it never writes to the cluster, the API
+                // or MongoDB, and never restarts the simulator or backend. The
+                // client is a pinned throwaway Node image (Node 22 ships a
+                // global WebSocket); Docker is a confirmed platform capability
+                // and a host `websocat` is not. `timeout` bounds the pull and
+                // the run; the script carries its own hard deadline.
+                timeout(time: 5, unit: 'MINUTES') {
+                    sh '''
+                        set -eu
+                        set +x
+
+                        timeout 120 docker pull node:22-alpine >/dev/null
+
+                        timeout 150 docker run --rm --network host \
+                            -e INGRESS_HOST="$INGRESS_HOST" \
+                            node:22-alpine node -e '
+const target = "ws://" + process.env.INGRESS_HOST + "/ws/sensors";
+const DEADLINE_MS = 90000;
+const KNOWN_TYPES = ["temperature", "humidity", "motion", "light", "pressure"];
+const windowStart = Date.now();
+let done = false;
+
+const fail = (m) => { console.error("WebSocket smoke FAIL: " + m); process.exit(1); };
+
+if (typeof WebSocket === "undefined") {
+  fail("this Node runtime exposes no global WebSocket");
+}
+
+const timer = setTimeout(
+  () => fail("no fresh sensor event within " + DEADLINE_MS + " ms"),
+  DEADLINE_MS
+);
+
+const ws = new WebSocket(target);
+
+ws.addEventListener("open", () => console.log("connected: " + target));
+ws.addEventListener("error", (e) =>
+  fail("socket error: " + (e && e.message ? e.message : "unknown"))
+);
+ws.addEventListener("close", () => {
+  if (!done) fail("socket closed before a fresh sensor event arrived");
+});
+ws.addEventListener("message", (ev) => {
+  let r;
+  try {
+    r = JSON.parse(typeof ev.data === "string" ? ev.data : String(ev.data));
+  } catch (_) {
+    return;
+  }
+  if (!r || typeof r.sensorId !== "string" || r.sensorId === "") return;
+  if (KNOWN_TYPES.indexOf(r.type) === -1) return;
+  if (typeof r.unit !== "string" || typeof r.location !== "string") return;
+  const t = Date.parse(r.timestamp);
+  if (Number.isNaN(t)) return;
+  // Tolerate benign agent/container clock skew: ignore an implausibly old
+  // frame and keep listening. If no acceptable event arrives, the DEADLINE_MS
+  // timer above still fails the smoke closed.
+  if (t < windowStart - 60000) return;
+  done = true;
+  clearTimeout(timer);
+  console.log(
+    "fresh OmniVise sensor event: sensorId=" + r.sensorId +
+    " type=" + r.type + " value=" + r.value + " unit=" + r.unit +
+    " timestamp=" + r.timestamp
+  );
+  try { ws.close(); } catch (_) {}
+  process.exit(0);
+});
+'
+                    '''
                 }
             }
         }
