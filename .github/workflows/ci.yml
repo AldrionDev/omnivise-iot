@@ -1,0 +1,115 @@
+name: CI
+
+# Pull-request CI gate for OmniVise.
+#
+# Scope boundary (see docs/architecture/delivery-architecture.md):
+#   - GitHub Actions owns pull-request CI (this workflow).
+#   - Jenkins owns post-merge delivery / CD.
+# This workflow runs the repository's supported application verification
+# commands, based on AGENTS.md / docs/development-workflow.md plus the
+# existing frontend test suite. It performs no delivery, deployment,
+# image publication, or infrastructure mutation.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Least privilege: the workflow only needs to read the repository contents.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend-verify:
+    name: Backend (Maven test + package)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Run backend tests
+        run: mvn --batch-mode --no-transfer-progress test
+
+      - name: Build backend package
+        run: mvn --batch-mode --no-transfer-progress package
+
+  simulator-verify:
+    name: Sensor simulator (Maven test + package)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: simulators
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: Run simulator tests
+        run: mvn --batch-mode --no-transfer-progress test
+
+      - name: Build simulator package
+        run: mvn --batch-mode --no-transfer-progress package
+
+  frontend-verify:
+    name: Frontend (npm ci + lint + test + build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+  compose-validate:
+    name: Docker Compose config validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate docker-compose.yml
+        run: docker compose config
