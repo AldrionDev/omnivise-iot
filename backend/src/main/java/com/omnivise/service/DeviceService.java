@@ -62,6 +62,24 @@ public class DeviceService {
     }
 
     /**
+     * The registered unit for one {@code deviceId} + {@code channel} pair, used
+     * by the history endpoint (issue #72) to fill the response {@code unit}.
+     *
+     * @return the channel's unit, or {@link Optional#empty()} if the device is
+     *         unknown or does not declare that channel
+     */
+    public Optional<String> findChannelUnit(String deviceId, String channel) {
+        Device device = devicesById.get(deviceId);
+        if (device == null) {
+            return Optional.empty();
+        }
+        return device.channels().stream()
+                .filter(c -> c.channel().equals(channel))
+                .map(Device.Channel::unit)
+                .findFirst();
+    }
+
+    /**
      * Maps a {@code devices} document to a {@link Device}. Package-private so the
      * mapping contract (including the nested {@code channels} array) can be
      * unit-tested directly.
