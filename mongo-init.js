@@ -30,6 +30,74 @@ const REQUIRED_READING_INDEXES = [
   { timestamp: -1 },
 ];
 
+// --- issue #73: threshold alerting -----------------------------------------
+// The approved, seeded rule set. Existing-state validation requires exactly
+// these ids AND this config (the `description` text is not validated).
+const EXPECTED_ALERT_RULES = [
+  {
+    _id: "rack-intake-temp-high",
+    ruleId: "rack-intake-temp-high",
+    enabled: true,
+    match: { deviceId: null, deviceKind: "rack", channel: "intake_temp" },
+    operator: ">",
+    threshold: 30,
+    clearThreshold: 27,
+    severity: "warning",
+    description: "Rack cold-aisle intake temperature is high",
+  },
+  {
+    _id: "rack-humidity-high",
+    ruleId: "rack-humidity-high",
+    enabled: true,
+    match: { deviceId: null, deviceKind: "rack", channel: "humidity" },
+    operator: ">",
+    threshold: 60,
+    clearThreshold: 55,
+    severity: "warning",
+    description: "Rack relative humidity is high",
+  },
+  {
+    _id: "crac-return-temp-high",
+    ruleId: "crac-return-temp-high",
+    enabled: true,
+    match: { deviceId: "crac-1", deviceKind: null, channel: "return_temp" },
+    operator: ">",
+    threshold: 41,
+    clearThreshold: 37,
+    severity: "warning",
+    description: "CRAC return-air temperature is high",
+  },
+  {
+    _id: "ups-input-voltage-low",
+    ruleId: "ups-input-voltage-low",
+    enabled: true,
+    match: { deviceId: "ups-1", deviceKind: null, channel: "input_voltage" },
+    operator: "<",
+    threshold: 180,
+    clearThreshold: 210,
+    severity: "critical",
+    description: "UPS input voltage lost (mains failure)",
+  },
+  {
+    _id: "ups-battery-low",
+    ruleId: "ups-battery-low",
+    enabled: true,
+    match: { deviceId: "ups-1", deviceKind: null, channel: "battery_pct" },
+    operator: "<",
+    threshold: 95,
+    clearThreshold: 98,
+    severity: "critical",
+    description: "UPS battery charge is low",
+  },
+];
+
+// Index key specs that must exist on `alert_events` for the #73 alert schema to
+// count as initialised.
+const REQUIRED_ALERT_EVENT_INDEXES = [
+  { state: 1, deviceId: 1, channel: 1 },
+  { startedAt: -1 },
+];
+
 print("🚀 MongoDB bootstrap starting...");
 
 // --- wait for a writable primary --------------------------------------------
@@ -255,6 +323,138 @@ function reportAndExit(problems, context) {
   quit(1);
 }
 
+// ---------------------------------------------------------------------------
+// Issue #73: additive alert bootstrap. Runs AFTER the #70 base-state decision
+// and never touches `devices` / `sensor_readings`. Same fail-closed contract,
+// scoped to the alert schema:
+//   * alert schema entirely absent  -> seed `alert_rules` + `alert_events` indexes
+//   * complete #73 alert state      -> validate, no reseed, no deletion
+//   * partial / inconsistent state  -> print the reason, exit non-zero
+// Ordering inside the seed puts the indexes LAST, so a crash mid-seed leaves a
+// state that validation rejects on the next run — it can never later look
+// "complete" by accident.
+// ---------------------------------------------------------------------------
+
+function alertEventsHasIndex(wantedKey) {
+  if (db.getCollectionNames().indexOf("alert_events") === -1) {
+    return false;
+  }
+  return hasRequiredIndex(db.alert_events, wantedKey);
+}
+
+function alertRuleEquals(expected, actual) {
+  const em = expected.match || {};
+  const am = actual.match || {};
+  return (
+    actual.ruleId === expected.ruleId &&
+    actual.enabled === expected.enabled &&
+    actual.operator === expected.operator &&
+    actual.threshold === expected.threshold &&
+    actual.clearThreshold === expected.clearThreshold &&
+    actual.severity === expected.severity &&
+    (am.deviceId || null) === (em.deviceId || null) &&
+    (am.deviceKind || null) === (em.deviceKind || null) &&
+    am.channel === em.channel
+  );
+}
+
+// Reasons the persisted alert schema is not a complete, consistent #73 state.
+// Empty list == fully initialised.
+function alertCompletenessProblems() {
+  const problems = [];
+
+  const actualRules = db.alert_rules.find({}).toArray();
+  const actualIds = actualRules.map((r) => r._id);
+  const expectedIds = EXPECTED_ALERT_RULES.map((r) => r._id);
+  const missing = expectedIds.filter((id) => actualIds.indexOf(id) === -1);
+  const unexpected = actualIds.filter((id) => expectedIds.indexOf(id) === -1);
+
+  if (actualIds.length !== expectedIds.length) {
+    problems.push(
+      "alert_rules: expected exactly " + expectedIds.length +
+        " rules, found " + actualIds.length,
+    );
+  }
+  if (missing.length) {
+    problems.push("alert_rules: missing " + JSON.stringify(missing));
+  }
+  if (unexpected.length) {
+    problems.push("alert_rules: unexpected " + JSON.stringify(unexpected));
+  }
+  EXPECTED_ALERT_RULES.forEach((expected) => {
+    const actual = actualRules.find((r) => r._id === expected._id);
+    if (actual && !alertRuleEquals(expected, actual)) {
+      problems.push(
+        "alert_rules: '" + expected._id + "' config differs from the approved seed",
+      );
+    }
+  });
+
+  for (const wanted of REQUIRED_ALERT_EVENT_INDEXES) {
+    if (!alertEventsHasIndex(wanted)) {
+      problems.push("alert_events: missing required index " + indexKeyString(wanted));
+    }
+  }
+
+  const eventsCount =
+    db.getCollectionNames().indexOf("alert_events") !== -1
+      ? db.alert_events.countDocuments()
+      : 0;
+  if (eventsCount > 0 && (missing.length || unexpected.length)) {
+    problems.push(
+      "alert_events: " + eventsCount +
+        " event(s) present while the alert_rules bootstrap is incomplete",
+    );
+  }
+
+  return problems;
+}
+
+function seedAlertSchema() {
+  db.alert_rules.insertMany(EXPECTED_ALERT_RULES, { ordered: true });
+  // Indexes LAST (see the section comment above).
+  REQUIRED_ALERT_EVENT_INDEXES.forEach((key) => db.alert_events.createIndex(key));
+}
+
+function alertBootstrap() {
+  const rulesCount = db.alert_rules.countDocuments();
+  const eventsExist = db.getCollectionNames().indexOf("alert_events") !== -1;
+  const eventsCount = eventsExist ? db.alert_events.countDocuments() : 0;
+  const indexesPresent = REQUIRED_ALERT_EVENT_INDEXES.filter((k) =>
+    alertEventsHasIndex(k),
+  ).length;
+
+  const isAlertFresh =
+    rulesCount === 0 && !eventsExist && eventsCount === 0 && indexesPresent === 0;
+
+  if (isAlertFresh) {
+    print("🌱 alert schema absent — seeding alert_rules and alert_events indexes");
+    seedAlertSchema();
+
+    const problems = alertCompletenessProblems();
+    if (problems.length) {
+      reportAndExit(problems, "alert seed post-condition failed (this should not happen)");
+    }
+
+    print(
+      "✅ alert schema seeded: " + db.alert_rules.countDocuments() + " rules, " +
+        REQUIRED_ALERT_EVENT_INDEXES.length + " alert_events indexes",
+    );
+    return;
+  }
+
+  print(
+    "🔎 alert schema present (" + rulesCount + " rules, " + eventsCount +
+      " events) — validating completeness, no reseed",
+  );
+  const problems = alertCompletenessProblems();
+  if (problems.length) {
+    reportAndExit(problems, "alert bootstrap state is partial or inconsistent");
+  }
+
+  print("✅ alert schema is complete and consistent — nothing to do");
+}
+
 // Deterministic fresh seed. Ordering matters: readings, then the registry, then
 // the indexes LAST — so a crash at any point leaves a state that
 // completenessProblems() rejects on the next run (it can never later look
@@ -291,17 +491,23 @@ if (isFresh) {
     "✅ seeded: " + db.devices.countDocuments() + " devices, " +
       db.sensor_readings.countDocuments() + " readings, required indexes present",
   );
-  quit(0);
+} else {
+  print(
+    "🔎 existing database (" + devicesCount + " devices, " + readingsCount +
+      " readings) — validating completeness, no reseed",
+  );
+  const problems = completenessProblems();
+  if (problems.length) {
+    reportAndExit(problems, "existing state is partial or inconsistent");
+  }
+
+  print("✅ existing state is complete and consistent — nothing to do");
 }
 
-print(
-  "🔎 existing database (" + devicesCount + " devices, " + readingsCount +
-    " readings) — validating completeness, no reseed",
-);
-const problems = completenessProblems();
-if (problems.length) {
-  reportAndExit(problems, "existing state is partial or inconsistent");
-}
+// Issue #73: additive alert bootstrap, as a separate phase after the base-state
+// decision above. A pre-#73 but otherwise valid database initialises the alert
+// schema here and succeeds; a completed state validates; a partial state exits
+// non-zero (reportAndExit).
+alertBootstrap();
 
-print("✅ existing state is complete and consistent — nothing to do");
 quit(0);
