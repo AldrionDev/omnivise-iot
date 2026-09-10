@@ -14,7 +14,9 @@ import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -93,10 +95,11 @@ class SensorChangeStreamListenerTest {
         verify(wsHandler, timeout(3_000)).broadcast(captor.capture());
 
         SensorReading delivered = captor.getValue();
-        assertEquals("sensor-001", delivered.sensorId());
-        assertEquals("temperature", delivered.type());
+        assertEquals("rack-a1", delivered.deviceId());
+        assertEquals("intake_temp", delivered.channel());
         assertEquals(25.5, delivered.value());
-        assertEquals("C", delivered.unit());
+        assertEquals("°C", delivered.unit());
+        assertEquals("2026-09-10T08:00:00Z", delivered.timestamp());
 
         verify(collection, atLeast(2)).watch();
         assertFalse(sleeps.isEmpty(), "a bounded wait must precede the reopen");
@@ -315,12 +318,11 @@ class SensorChangeStreamListenerTest {
     }
 
     private Document sampleDoc() {
-        return new Document("sensor_id", "sensor-001")
-                .append("type", "temperature")
+        return new Document("deviceId", "rack-a1")
+                .append("channel", "intake_temp")
                 .append("value", 25.5)
-                .append("unit", "C")
-                .append("location", "Office Room 1")
-                .append("timestamp", "2026-03-01T12:00:00Z");
+                .append("unit", "°C")
+                .append("timestamp", Date.from(Instant.parse("2026-09-10T08:00:00Z")));
     }
 
     private static boolean awaitThenFalse(CountDownLatch latch) {

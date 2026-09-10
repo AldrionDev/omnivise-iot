@@ -10,7 +10,6 @@ services:
       MONGO_INITDB_DATABASE: ${MONGO_INITDB_DATABASE:-omnivise_iot}
     volumes:
       - mongodb_data:/data/db
-      - ./mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
       - ./mongo-replica-init.js:/docker-entrypoint-initdb.d/mongo-replica-init.js:ro
     networks:
       - omnivise-network
@@ -37,6 +36,29 @@ services:
       timeout: 5s
       retries: 30
       start_period: 15s
+
+  # One-shot seeder: creates the read-only `devices` registry and the initial
+  # `sensor_readings` in the deviceId/channel shape. It runs only after the
+  # replica set has a writable primary (mongodb healthy); seeding during the
+  # mongod init phase is impossible because the replica set is not yet primary.
+  # Idempotent — skips a database that already has devices.
+  mongo-seed:
+    image: mongo:7.0
+    container_name: omnivise-mongo-seed
+    restart: "no"
+    command:
+      - mongosh
+      - mongodb://mongodb:27017/?replicaSet=rs0
+      - --quiet
+      - --file
+      - /seed/mongo-init.js
+    volumes:
+      - ./mongo-init.js:/seed/mongo-init.js:ro
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - omnivise-network
 
   mongo-express:
     image: mongo-express:1.0
@@ -71,6 +93,8 @@ services:
     depends_on:
       mongodb:
         condition: service_healthy
+      mongo-seed:
+        condition: service_completed_successfully
     networks:
       - omnivise-network
     healthcheck:
@@ -103,6 +127,8 @@ services:
     depends_on:
       mongodb:
         condition: service_healthy
+      mongo-seed:
+        condition: service_completed_successfully
     networks:
       - omnivise-network
 

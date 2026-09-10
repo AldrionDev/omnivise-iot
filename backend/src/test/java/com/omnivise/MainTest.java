@@ -72,4 +72,20 @@ class MainTest {
                         "legacy-user",
                         ""));
     }
+
+    @Test
+    void clampLimitKeepsAnInRangeValueUnchanged() {
+        assertEquals(50, Main.clampLimit(50));
+    }
+
+    @Test
+    void clampLimitRaisesANonPositiveValueToOne() {
+        assertEquals(1, Main.clampLimit(0));
+        assertEquals(1, Main.clampLimit(-10));
+    }
+
+    @Test
+    void clampLimitCapsAnExcessiveValueAtFiveHundred() {
+        assertEquals(500, Main.clampLimit(10_000));
+    }
 }

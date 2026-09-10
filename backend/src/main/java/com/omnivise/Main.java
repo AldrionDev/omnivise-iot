@@ -3,9 +3,12 @@ package com.omnivise;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
+import java.util.Map;
 
 import com.omnivise.handler.WebSocketHandler;
+import com.omnivise.model.Device;
 import com.omnivise.model.SensorReading;
+import com.omnivise.service.DeviceService;
 import com.omnivise.service.SensorChangeStreamListener;
 import com.omnivise.service.SensorService;
 
@@ -42,8 +45,9 @@ public class Main {
         System.out.println("🔌 MongoDB connection configured for database: " + mongoDatabase);
         System.out.println("🌐 Port: " + port);
 
-        // Initialize MongoDB service
+        // Initialize MongoDB services
         SensorService sensorService = new SensorService(mongoUri, mongoDatabase);
+        DeviceService deviceService = new DeviceService(mongoUri, mongoDatabase);
 
         // Initialize WebSocket handler
         WebSocketHandler wsHandler = new WebSocketHandler();
@@ -60,13 +64,13 @@ public class Main {
                 new Thread(changeStreamListener::stop, "shutdown-changestream"));
 
         // Test MongoDB connection by fetching 5 latest readings
-        List<SensorReading> testLatestReadings = sensorService.getLatestReadings(5);
+        List<SensorReading> testLatestReadings = sensorService.getLatestReadings(null, null, 5);
         System.out.println("📊 Latest 5 sensor readings: " + testLatestReadings.size() + " found");
         if (!testLatestReadings.isEmpty()) {
+            SensorReading example = testLatestReadings.get(0);
             System.out.println(
-                    " - Example: " + testLatestReadings.get(0).sensorId() + " | " + testLatestReadings.get(0).type()
-                            + " | " + testLatestReadings.get(0).value() + " " + testLatestReadings.get(0).unit() + " | "
-                            + testLatestReadings.get(0).location() + " | " + testLatestReadings.get(0).timestamp());
+                    " - Example: " + example.deviceId() + " | " + example.channel()
+                            + " | " + example.value() + " " + example.unit() + " | " + example.timestamp());
         }
 
         // Javalin app create and start
@@ -98,29 +102,28 @@ public class Main {
         // Health check endpoint
         app.get("/health", ctx -> ctx.json(new Response("status", "healthy")));
 
-        // Get latest sensor readings
-        // GET /api/sensors/latest?limit=50
+        // Device registry (seeded, read-only)
+        // GET /api/devices
+        app.get("/api/devices", ctx -> ctx.json(deviceService.getAllDevices()));
+
+        // GET /api/devices/{deviceId}
+        app.get("/api/devices/{deviceId}", ctx -> {
+            String deviceId = ctx.pathParam("deviceId");
+            Device device = deviceService.getDevice(deviceId).orElse(null);
+            if (device == null) {
+                ctx.status(404).json(Map.of("error", "device not found", "deviceId", deviceId));
+                return;
+            }
+            ctx.json(device);
+        });
+
+        // Latest sensor readings, newest first, optional deviceId / channel filters
+        // GET /api/sensors/latest?deviceId=&channel=&limit=50
         app.get("/api/sensors/latest", ctx -> {
-            int limit = ctx.queryParamAsClass("limit", Integer.class).getOrDefault(50);
-            List<SensorReading> readings = sensorService.getLatestReadings(limit);
-            ctx.json(readings);
-        });
-
-        // Get readings by type
-        // GET /api/sensors/type/{type}?limit=50
-        app.get("/api/sensors/type/{type}", ctx -> {
-            String type = ctx.pathParam("type");
-            int limit = ctx.queryParamAsClass("limit", Integer.class).getOrDefault(50);
-            List<SensorReading> readings = sensorService.getReadingsByType(type, limit);
-            ctx.json(readings);
-        });
-
-        // Get readings by location
-        // GET /api/sensors/location/{location}?limit=50
-        app.get("/api/sensors/location/{location}", ctx -> {
-            String location = ctx.pathParam("location");
-            int limit = ctx.queryParamAsClass("limit", Integer.class).getOrDefault(50);
-            List<SensorReading> readings = sensorService.getReadingsByLocation(location, limit);
+            String deviceId = ctx.queryParam("deviceId");
+            String channel = ctx.queryParam("channel");
+            int limit = clampLimit(ctx.queryParamAsClass("limit", Integer.class).getOrDefault(50));
+            List<SensorReading> readings = sensorService.getLatestReadings(deviceId, channel, limit);
             ctx.json(readings);
         });
 
@@ -130,9 +133,17 @@ public class Main {
         System.out.println("\n📋 REST API endpoints:");
         System.out.println("   GET  /");
         System.out.println("   GET  /health");
-        System.out.println("   GET  /api/sensors/latest?limit=50");
-        System.out.println("   GET  /api/sensors/type/{type}?limit=50");
-        System.out.println("   GET  /api/sensors/location/{location}?limit=50");
+        System.out.println("   GET  /api/devices");
+        System.out.println("   GET  /api/devices/{deviceId}");
+        System.out.println("   GET  /api/sensors/latest?deviceId=&channel=&limit=50");
+    }
+
+    /** Keeps the {@code limit} query parameter within a sane, non-negative range. */
+    static int clampLimit(int requested) {
+        if (requested < 1) {
+            return 1;
+        }
+        return Math.min(requested, 500);
     }
 
     /**
