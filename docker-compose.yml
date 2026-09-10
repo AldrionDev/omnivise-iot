@@ -124,6 +124,10 @@ services:
       MONGO_DATABASE: ${MONGO_INITDB_DATABASE:-omnivise_iot}
       MONGO_COLLECTION: sensor_readings
       INTERVAL_SECONDS: ${SIMULATOR_INTERVAL:-5}
+      ANOMALY_MODE: ${SIMULATOR_ANOMALY_MODE:-false}
+      ANOMALY_EVERY_TICKS: ${SIMULATOR_ANOMALY_EVERY_TICKS:-60}
+      ANOMALY_DURATION_TICKS: ${SIMULATOR_ANOMALY_DURATION_TICKS:-6}
+      SEED: ${SIMULATOR_SEED:-42}
     depends_on:
       mongodb:
         condition: service_healthy
