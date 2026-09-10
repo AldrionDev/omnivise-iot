@@ -61,8 +61,8 @@ public class WebSocketHandler {
         }
 
         try {
-            // Serialize SensorReading to JSON
-            String jsonMessage = objectMapper.writeValueAsString(reading);
+            // Serialize the typed envelope: { "kind": "reading", "payload": { ... } }
+            String jsonMessage = objectMapper.writeValueAsString(ReadingMessage.of(reading));
 
             clients.forEach((ctx, sessionId) -> {
                 try {

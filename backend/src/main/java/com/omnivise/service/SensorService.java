@@ -9,25 +9,29 @@ import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoDatabase;
+import com.omnivise.mapper.SensorReadingMapper;
 import com.omnivise.model.SensorReading;
 
 /**
- * Service layer for sensor data operations.
- * Handles MongoDB connection and data retrieval for sensor readings
+ * Read access to the {@code sensor_readings} collection.
+ *
+ * <p>Since issue #70 a reading is keyed by {@code deviceId} + {@code channel};
+ * the only query is "latest readings, newest first, optionally filtered by
+ * device and/or channel". Document mapping is delegated to the shared
+ * {@link SensorReadingMapper}.
  */
-
 public class SensorService {
+
+    /** Sort applied to every "latest readings" query: newest first. */
+    static final Document SORT_NEWEST_FIRST = new Document("timestamp", -1);
 
     private final MongoCollection<Document> collection;
 
     /**
-     * Initializes the SensorService and establishes connection to MongoDB.
-     * Creates a MongoDB client, connects to the specified database,
-     * and retrieves the 'sensor_readings' collection.
-     * 
-     * @param mongoUri The MongoDB connection URI (e.g.,
-     *                 "mongodb://user:pass@host:27017")
-     * @param database Database name to connect to (e.g., "omnivise_iot")
+     * Connects to MongoDB and resolves the {@code sensor_readings} collection.
+     *
+     * @param mongoUri MongoDB connection URI
+     * @param database database name (e.g. {@code omnivise_iot})
      */
     public SensorService(String mongoUri, String database) {
         MongoClient mongoClient = MongoClients.create(mongoUri);
@@ -37,88 +41,44 @@ public class SensorService {
     }
 
     /**
-     * Retrieves the latest sensor readings from the database.
-     * Results are sorted by _id in descending order (newest first).
-     * Using _id ensures chronological ordering regardless of timestamp format.
-     * 
-     * @param limit The maximum number of readings to return
-     * @return List of SensorReading objects, sorted by _id (newest first)
+     * Latest readings, newest first, optionally filtered by device and/or
+     * channel. A {@code null} or blank filter component is treated as "no
+     * filter on that field".
+     *
+     * @param deviceId device id filter, or {@code null}/blank for any device
+     * @param channel  channel filter, or {@code null}/blank for any channel
+     * @param limit    maximum number of readings to return
+     * @return readings sorted by {@code timestamp} descending
      */
-    public List<SensorReading> getLatestReadings(int limit) {
+    public List<SensorReading> getLatestReadings(String deviceId, String channel, int limit) {
         List<SensorReading> readings = new ArrayList<>();
-
-        collection.find()
-                .sort(new Document("_id", -1))
+        collection.find(buildLatestFilter(deviceId, channel))
+                .sort(SORT_NEWEST_FIRST)
                 .limit(limit)
-                .forEach(doc -> readings.add(documentToReading(doc)));
-
+                .forEach(doc -> readings.add(SensorReadingMapper.fromDocument(doc)));
         return readings;
     }
 
     /**
-     * Helper method to convert a MongoDB Document into a SensorReading record.
-     * 
-     * @param doc The MongoDB document from the sensor_readings collection
-     * @return A SensorReading object with mapped fields from the document
+     * Builds the MongoDB filter for {@link #getLatestReadings}. Package-private
+     * so the filter-construction contract can be unit-tested without a live
+     * MongoDB.
      */
-    private SensorReading documentToReading(Document doc) {
-        Object timestampObj = doc.get("timestamp");
-        String timestamp;
-        if (timestampObj instanceof java.util.Date) {
-            timestamp = timestampObj.toString();
-        } else if (timestampObj instanceof String) {
-            timestamp = (String) timestampObj;
-        } else {
-            timestamp = String.valueOf(timestampObj);
+    static Document buildLatestFilter(String deviceId, String channel) {
+        Document filter = new Document();
+        if (deviceId != null && !deviceId.isBlank()) {
+            filter.append("deviceId", deviceId);
         }
-        return new SensorReading(
-                doc.getString("sensor_id"),
-                doc.getString("type"),
-                doc.get("value"),
-                doc.getString("unit"),
-                doc.getString("location"),
-                timestamp);
-    }
-
-    /**
-     * Retrieves sensor readings filtered by sensor type.
-     * Results are sorted by _id in descending order (newest first).
-     * 
-     * @param type  The sensor type to filter by (e.g., "temperature")
-     * @param limit The maximum number of readings to return
-     * @return List of SensorReading objects, sorted by _id (newest first)
-     * 
-     */
-    public List<SensorReading> getReadingsByType(String type, int limit) {
-        List<SensorReading> readings = new ArrayList<>();
-        collection.find(new Document("type", type))
-                .sort(new Document("_id", -1))
-                .limit(limit)
-                .forEach(doc -> readings.add(documentToReading(doc)));
-        return readings;
-    }
-
-    /**
-     * Retrieves sensor readings filtered by location.
-     * Results are sorted by _id in descending order (newest first).
-     * 
-     * @param location The location to filter by (e.g., "living_room")
-     * @param limit    The maximum number of readings to return
-     * @return List of SensorReading objects from the specified location.
-     */
-    public List<SensorReading> getReadingsByLocation(String location, int limit) {
-        List<SensorReading> readings = new ArrayList<>();
-        collection.find(new Document("location", location))
-                .sort(new Document("_id", -1))
-                .limit(limit)
-                .forEach(doc -> readings.add(documentToReading(doc)));
-        return readings;
+        if (channel != null && !channel.isBlank()) {
+            filter.append("channel", channel);
+        }
+        return filter;
     }
 
     /**
      * Returns the MongoDB collection for Change Stream listening.
-     * 
-     * @return The sensor_readings MongoDB collection
+     *
+     * @return the {@code sensor_readings} collection
      */
     public MongoCollection<Document> getCollection() {
         return collection;

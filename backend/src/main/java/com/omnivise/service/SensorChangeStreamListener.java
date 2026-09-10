@@ -7,6 +7,7 @@ import com.mongodb.client.MongoChangeStreamCursor;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.model.changestream.ChangeStreamDocument;
 import com.omnivise.handler.WebSocketHandler;
+import com.omnivise.mapper.SensorReadingMapper;
 import com.omnivise.model.SensorReading;
 
 /**
@@ -202,11 +203,11 @@ public class SensorChangeStreamListener {
             return;
         }
 
-        SensorReading reading = documentToReading(doc);
+        SensorReading reading = SensorReadingMapper.fromDocument(doc);
         wsHandler.broadcast(reading);
 
-        System.out.println("📤 Broadcasted: " + reading.sensorId()
-                + " | " + reading.type() + " = " + reading.value() + " " + reading.unit());
+        System.out.println("📤 Broadcasted: " + reading.deviceId()
+                + " | " + reading.channel() + " = " + reading.value() + " " + reading.unit());
     }
 
     private void logInterruption(Exception e, int consecutiveFailures) {
@@ -214,31 +215,6 @@ public class SensorChangeStreamListener {
         System.err.println("⚠️ Change Stream interrupted: "
                 + e.getClass().getSimpleName() + code
                 + " — \"" + e.getMessage() + "\" (attempt #" + consecutiveFailures + " will reopen)");
-    }
-
-    /**
-     * Converts MongoDB Document to SensorReading record.
-     * Handles different timestamp formats (Date, String, or other).
-     */
-    private SensorReading documentToReading(Document doc) {
-        Object timestampObj = doc.get("timestamp");
-        String timestamp;
-
-        if (timestampObj instanceof java.util.Date) {
-            timestamp = timestampObj.toString();
-        } else if (timestampObj instanceof String) {
-            timestamp = (String) timestampObj;
-        } else {
-            timestamp = String.valueOf(timestampObj);
-        }
-
-        return new SensorReading(
-                doc.getString("sensor_id"),
-                doc.getString("type"),
-                doc.get("value"),
-                doc.getString("unit"),
-                doc.getString("location"),
-                timestamp);
     }
 
     /**
