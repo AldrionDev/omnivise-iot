@@ -36,6 +36,7 @@ public class SensorChangeStreamListener {
 
     private final MongoCollection<Document> collection;
     private final WebSocketHandler wsHandler;
+    private final AlertEvaluator alertEvaluator;
     private final Backoff backoff;
     private final Sleeper sleeper;
 
@@ -46,11 +47,15 @@ public class SensorChangeStreamListener {
     /**
      * Creates a new Change Stream Listener with production retry defaults.
      *
-     * @param collection MongoDB collection to watch for changes
-     * @param wsHandler  WebSocket handler for broadcasting data
+     * @param collection     MongoDB collection to watch for changes
+     * @param wsHandler       WebSocket handler for broadcasting data
+     * @param alertEvaluator  threshold-rule evaluation run inline for each insert (issue #73)
      */
-    public SensorChangeStreamListener(MongoCollection<Document> collection, WebSocketHandler wsHandler) {
-        this(collection, wsHandler, DEFAULT_BASE_DELAY_MS, DEFAULT_MAX_DELAY_MS, Thread::sleep);
+    public SensorChangeStreamListener(
+            MongoCollection<Document> collection,
+            WebSocketHandler wsHandler,
+            AlertEvaluator alertEvaluator) {
+        this(collection, wsHandler, alertEvaluator, DEFAULT_BASE_DELAY_MS, DEFAULT_MAX_DELAY_MS, Thread::sleep);
     }
 
     /**
@@ -60,11 +65,13 @@ public class SensorChangeStreamListener {
     SensorChangeStreamListener(
             MongoCollection<Document> collection,
             WebSocketHandler wsHandler,
+            AlertEvaluator alertEvaluator,
             long baseDelayMs,
             long maxDelayMs,
             Sleeper sleeper) {
         this.collection = collection;
         this.wsHandler = wsHandler;
+        this.alertEvaluator = alertEvaluator;
         this.backoff = new Backoff(baseDelayMs, maxDelayMs);
         this.sleeper = sleeper;
     }
@@ -208,6 +215,16 @@ public class SensorChangeStreamListener {
 
         System.out.println("📤 Broadcasted: " + reading.deviceId()
                 + " | " + reading.channel() + " = " + reading.value() + " " + reading.unit());
+
+        // Threshold alerting runs inline on this thread (issue #73). It is
+        // self-contained and non-blocking, but a failure here must never be
+        // mistaken for a Change Stream error and trigger the reconnection
+        // backoff — so it is caught and contained.
+        try {
+            alertEvaluator.evaluate(reading);
+        } catch (RuntimeException e) {
+            System.err.println("⚠️ Alert evaluation raised past its own guard: " + e);
+        }
     }
 
     private void logInterruption(Exception e, int consecutiveFailures) {

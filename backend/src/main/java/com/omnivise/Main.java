@@ -8,10 +8,15 @@ import java.util.Map;
 import com.omnivise.handler.WebSocketHandler;
 import com.omnivise.model.Device;
 import com.omnivise.model.SensorReading;
+import com.omnivise.service.AlertEvaluator;
+import com.omnivise.service.AlertQuery;
+import com.omnivise.service.AlertRuleService;
+import com.omnivise.service.AlertService;
 import com.omnivise.service.DeviceService;
 import com.omnivise.service.SensorChangeStreamListener;
 import com.omnivise.service.SensorHistoryRequest;
 import com.omnivise.service.SensorService;
+import com.omnivise.webhook.AlertWebhook;
 
 import io.github.cdimascio.dotenv.Dotenv;
 import io.javalin.Javalin;
@@ -57,15 +62,33 @@ public class Main {
         // Initialize MongoDB services
         SensorService sensorService = new SensorService(mongoUri, mongoDatabase);
         DeviceService deviceService = new DeviceService(mongoUri, mongoDatabase);
+        AlertService alertService = new AlertService(mongoUri, mongoDatabase);
+
+        // Threshold alerting (issue #73). Both of these fail startup on bad
+        // configuration rather than running a silently incomplete alert policy:
+        // an invalid enabled seeded rule, or a non-blank but malformed
+        // ALERT_WEBHOOK_URL. An unset/blank ALERT_WEBHOOK_URL disables the webhook.
+        AlertRuleService alertRuleService = new AlertRuleService(mongoUri, mongoDatabase);
+        AlertWebhook alertWebhook = AlertWebhook.fromConfig(getEnvVar("ALERT_WEBHOOK_URL", null));
+        System.out.println("🔔 Alert rules: " + alertRuleService.getRules().size()
+                + " enabled; webhook " + alertWebhook.getClass().getSimpleName());
 
         // Initialize WebSocket handler
         WebSocketHandler wsHandler = new WebSocketHandler();
         System.out.println("🔌 WebSocket handler initialized");
 
+        AlertEvaluator alertEvaluator = new AlertEvaluator(
+                alertService.getCollection(),
+                alertRuleService,
+                deviceService,
+                wsHandler,
+                alertWebhook);
+
         // Initialize and start MongoDB Change Stream Listener
         SensorChangeStreamListener changeStreamListener = new SensorChangeStreamListener(
                 sensorService.getCollection(),
-                wsHandler);
+                wsHandler,
+                alertEvaluator);
         changeStreamListener.start();
 
         // Stop the Change Stream listener cleanly on application shutdown (SIGTERM / Ctrl-C).
@@ -158,6 +181,35 @@ public class Main {
             ctx.json(sensorService.history(request));
         });
 
+        // Alert events, newest first, optional state / severity / deviceId / limit.
+        // GET /api/alerts?state=firing|resolved&severity=warning|critical&deviceId=&limit=100
+        app.get("/api/alerts", ctx -> {
+            AlertQuery.Result parsed = AlertQuery.parse(
+                    ctx.queryParam("state"),
+                    ctx.queryParam("severity"),
+                    ctx.queryParam("deviceId"),
+                    ctx.queryParam("limit"));
+            if (parsed instanceof AlertQuery.Invalid invalid) {
+                ctx.status(400).json(invalid);
+                return;
+            }
+            ctx.json(alertService.find(((AlertQuery.Valid) parsed).query()));
+        });
+
+        // Convenience for state=firing; the caller cannot override state.
+        // GET /api/alerts/active?severity=&deviceId=&limit=100
+        app.get("/api/alerts/active", ctx -> {
+            AlertQuery.Result parsed = AlertQuery.forActive(
+                    ctx.queryParam("severity"),
+                    ctx.queryParam("deviceId"),
+                    ctx.queryParam("limit"));
+            if (parsed instanceof AlertQuery.Invalid invalid) {
+                ctx.status(400).json(invalid);
+                return;
+            }
+            ctx.json(alertService.find(((AlertQuery.Valid) parsed).query()));
+        });
+
         System.out.println("✅ Server running at http://localhost:" + port);
         System.out.println("\n📡 WebSocket endpoint:");
         System.out.println("   WS   /ws/sensors");
@@ -168,6 +220,8 @@ public class Main {
         System.out.println("   GET  /api/devices/{deviceId}");
         System.out.println("   GET  /api/sensors/latest?deviceId=&channel=&limit=50");
         System.out.println("   GET  /api/sensors/history?deviceId=&channel=&from=&to=&bucket=1m|5m|1h");
+        System.out.println("   GET  /api/alerts?state=firing|resolved&severity=&deviceId=&limit=100");
+        System.out.println("   GET  /api/alerts/active?severity=&deviceId=&limit=100");
     }
 
     /** Keeps the {@code limit} query parameter within a sane, non-negative range. */
