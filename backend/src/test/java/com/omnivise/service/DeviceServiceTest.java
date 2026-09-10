@@ -90,4 +90,31 @@ class DeviceServiceTest {
         assertTrue(service.getAllDevices().isEmpty());
         assertFalse(service.getDevice("rack-a1").isPresent());
     }
+
+    // ------------------------------------------------------------------
+    // Unit resolution for the history endpoint (issue #72)
+    // ------------------------------------------------------------------
+
+    @Test
+    void findChannelUnitReturnsTheRegisteredUnitForAKnownDeviceAndChannel() {
+        DeviceService service = new DeviceService(List.of(rackDoc(), upsDoc()));
+
+        assertEquals(Optional.of("°C"), service.findChannelUnit("rack-a1", "intake_temp"));
+        assertEquals(Optional.of("state"), service.findChannelUnit("rack-a1", "door_contact"));
+        assertEquals(Optional.of("%"), service.findChannelUnit("ups-1", "load_pct"));
+    }
+
+    @Test
+    void findChannelUnitReturnsEmptyForAKnownDeviceButUnknownChannel() {
+        DeviceService service = new DeviceService(List.of(rackDoc()));
+
+        assertEquals(Optional.empty(), service.findChannelUnit("rack-a1", "no_such_channel"));
+    }
+
+    @Test
+    void findChannelUnitReturnsEmptyForAnUnknownDevice() {
+        DeviceService service = new DeviceService(List.of(rackDoc()));
+
+        assertEquals(Optional.empty(), service.findChannelUnit("no-such-device", "intake_temp"));
+    }
 }

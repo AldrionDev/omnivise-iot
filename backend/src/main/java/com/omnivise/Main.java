@@ -10,12 +10,21 @@ import com.omnivise.model.Device;
 import com.omnivise.model.SensorReading;
 import com.omnivise.service.DeviceService;
 import com.omnivise.service.SensorChangeStreamListener;
+import com.omnivise.service.SensorHistoryRequest;
 import com.omnivise.service.SensorService;
 
 import io.github.cdimascio.dotenv.Dotenv;
 import io.javalin.Javalin;
 
 public class Main {
+
+    /**
+     * Approved maximum number of aligned {@code $dateTrunc} buckets a single
+     * history query may span; a larger range/bucket combination is rejected with
+     * {@code 400}. Maintainer decision for issue #72.
+     */
+    static final int HISTORY_MAX_BUCKET_COUNT = 1000;
+
     private static Dotenv dotenv;
 
     public static void main(String[] args) {
@@ -127,6 +136,28 @@ public class Main {
             ctx.json(readings);
         });
 
+        // Down-sampled time-series for one device/channel over a time range.
+        // GET /api/sensors/history?deviceId=&channel=&from=&to=&bucket=1m|5m|1h
+        app.get("/api/sensors/history", ctx -> {
+            SensorHistoryRequest.Result parsed = SensorHistoryRequest.parse(
+                    ctx.queryParam("deviceId"),
+                    ctx.queryParam("channel"),
+                    ctx.queryParam("from"),
+                    ctx.queryParam("to"),
+                    ctx.queryParam("bucket"),
+                    deviceService,
+                    HISTORY_MAX_BUCKET_COUNT);
+
+            // parsed is a sealed Result: reject Invalid with a structured 400,
+            // otherwise run the history query for the normalised Valid request.
+            if (parsed instanceof SensorHistoryRequest.Invalid invalid) {
+                ctx.status(400).json(invalid);
+                return;
+            }
+            SensorHistoryRequest request = ((SensorHistoryRequest.Valid) parsed).request();
+            ctx.json(sensorService.history(request));
+        });
+
         System.out.println("✅ Server running at http://localhost:" + port);
         System.out.println("\n📡 WebSocket endpoint:");
         System.out.println("   WS   /ws/sensors");
@@ -136,6 +167,7 @@ public class Main {
         System.out.println("   GET  /api/devices");
         System.out.println("   GET  /api/devices/{deviceId}");
         System.out.println("   GET  /api/sensors/latest?deviceId=&channel=&limit=50");
+        System.out.println("   GET  /api/sensors/history?deviceId=&channel=&from=&to=&bucket=1m|5m|1h");
     }
 
     /** Keeps the {@code limit} query parameter within a sane, non-negative range. */
