@@ -3,30 +3,36 @@
 # framework-write-guard.sh — PreToolUse guard for the file-mutation tools
 # (matcher: Edit|Write|MultiEdit|NotebookEdit).
 #
+# Issue #67: this guard is INERT unless OMNIVISE_WORKFLOW_MODE=orchestrator (see
+# the pass-through gate below). The policy described here applies only on that
+# orchestrator path; every other session passes through with no restriction.
+#
 # Policy (Issue #17, accepted Revision 5 plan + Review Correction Round 1):
 #
-#   canonical target is Git metadata      -> DENY in BOTH modes
-#                                            (SAFETY_GIT_METADATA_MUTATION_DENIED)
-#   canonical target is under .claude/    -> DENY in issue AND orchestrator mode
-#                                            (SAFETY_FRAMEWORK_MUTATION_DENIED);
-#                                            ALLOW in framework-maintenance mode
+#   canonical target is Git metadata       -> DENY
+#                                             (SAFETY_GIT_METADATA_MUTATION_DENIED)
+#   canonical target is under .claude/     -> DENY
+#                                             (SAFETY_FRAMEWORK_MUTATION_DENIED);
+#                                             ALLOW only in framework-maintenance mode
 #   canonical target elsewhere in the repo -> ALLOW
-#   canonical target outside the repo root -> DENY in BOTH modes
-#                                            (SAFETY_OUTSIDE_REPO_WRITE_DENIED)
+#   canonical target outside the repo root -> DENY
+#                                             (SAFETY_OUTSIDE_REPO_WRITE_DENIED)
 #
-# framework-maintenance relaxes ONLY framework (.claude/**) writes. It never
+# The framework-maintenance relaxation applies to .claude/** writes only. It never
 # relaxes Git-metadata protection and never permits a write outside the project
 # root (an in-repo symlink resolving outside the tree is an outside-repo write).
-#
-# The Issue #19 `orchestrator` mode carries Git/GitHub lifecycle authority
-# through the Bash guard only. For file-tool writes it is exactly as restrictive
-# as issue mode: the relaxation below is granted to framework-maintenance and to
-# nothing else.
 #
 # Invoked as: bash "${CLAUDE_PROJECT_DIR}/.claude/hooks/framework-write-guard.sh"
 # No executable bit is required.
 
 set -euo pipefail
+
+# Issue #67 pass-through gate — first statement, before any sourcing or rule
+# evaluation. The fail-closed boundary applies only to the deterministic
+# orchestrated workflow (OMNIVISE_WORKFLOW_MODE=orchestrator, set by
+# launch-issue.sh and inherited by every dispatched subagent). In every other
+# session file-tool writes are unrestricted and rely on maintainer discipline.
+[ "${OMNIVISE_WORKFLOW_MODE-}" = "orchestrator" ] || exit 0
 
 _here="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || _here=""
 if [ -z "$_here" ] || [ ! -f "$_here/guard-common.sh" ]; then

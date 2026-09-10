@@ -679,6 +679,36 @@ Parallel issue execution may be considered later, but the initial orchestrator s
 
 ---
 
+## Safety-guard hooks
+
+The repository registers three guard hooks in `.claude/settings.json`:
+
+* `shell-guard.sh` (`PreToolUse`, `Bash`)
+* `framework-write-guard.sh` (`PreToolUse`, `Edit|Write|MultiEdit|NotebookEdit`)
+* `worktree-create-guard.sh` (`WorktreeCreate`)
+
+These hooks enforce a fail-closed boundary — no arbitrary `bash` or `gh`, no
+output redirection, no writes under `.claude/**`, no writes outside the
+repository root, and no Claude-managed worktree creation — **only when the
+environment variable `OMNIVISE_WORKFLOW_MODE` is `orchestrator`** (issue #67).
+That value is set by `.claude/scripts/launch-issue.sh` for a deterministic
+orchestrated run and is inherited by every dispatched subagent and every
+command-hook invocation, so the boundary covers the whole orchestrated workflow.
+
+In every other session — ordinary interactive maintainer work, with the variable
+unset or set to any other value — the hooks exit immediately and impose no
+restriction. Interactive sessions in this repository are therefore not sandboxed
+by these hooks; safety then rests on maintainer discipline. This is an accepted
+trade-off: hook #17 introduced the boundary for all sessions, and issue #67
+scoped it to the orchestrated workflow because it was blocking routine
+maintainer work.
+
+Independently of the mode, `.claude/settings.json` also denies the
+`EnterWorktree`, `ExitWorktree`, `Monitor`, and `PowerShell` tools in every
+session via `permissions.deny`.
+
+---
+
 ## Human ownership
 
 AI tools assist development but do not own repository decisions.
