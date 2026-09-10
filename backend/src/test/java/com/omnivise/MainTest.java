@@ -1,8 +1,20 @@
 package com.omnivise;
 
-public class MainTest {
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
-    public void testExplicitMongoUriTakesPrecedence() {
+import org.junit.jupiter.api.Test;
+
+/**
+ * Unit tests for {@link Main#resolveMongoUri}.
+ *
+ * <p>An explicit non-empty {@code MONGO_URI} is authoritative. When it is absent
+ * or empty, the legacy host/port/user/password URI construction is used, and
+ * authentication is only added when both a username and a password are present.
+ */
+class MainTest {
+
+    @Test
+    void explicitMongoUriTakesPrecedenceOverLegacyFields() {
         assertEquals(
                 "mongodb://mongodb:27017/?replicaSet=rs0",
                 Main.resolveMongoUri(
@@ -13,29 +25,8 @@ public class MainTest {
                         "legacy-password"));
     }
 
-    public void testAbsentMongoUriUsesUnauthenticatedLegacyFallback() {
-        assertEquals(
-                "mongodb://localhost:27017",
-                Main.resolveMongoUri(
-                        null,
-                        "localhost",
-                        "27017",
-                        null,
-                        null));
-    }
-
-    public void testEmptyMongoUriUsesUnauthenticatedLegacyFallback() {
-        assertEquals(
-                "mongodb://mongo-host:27019",
-                Main.resolveMongoUri(
-                        "",
-                        "mongo-host",
-                        "27019",
-                        null,
-                        null));
-    }
-
-    public void testEmptyMongoUriPreservesAuthenticatedLegacyFallback() {
+    @Test
+    void userAndPasswordProduceAuthenticatedLegacyUri() {
         assertEquals(
                 "mongodb://legacy-user:legacy-password@mongo-host:27019/?directConnection=true",
                 Main.resolveMongoUri(
@@ -46,7 +37,32 @@ public class MainTest {
                         "legacy-password"));
     }
 
-    public void testIncompleteLegacyCredentialsUseUnauthenticatedFallback() {
+    @Test
+    void hostOnlyConfigurationProducesUnauthenticatedLegacyUri() {
+        assertEquals(
+                "mongodb://localhost:27017",
+                Main.resolveMongoUri(
+                        null,
+                        "localhost",
+                        "27017",
+                        null,
+                        null));
+    }
+
+    @Test
+    void emptyMongoUriFallsBackToUnauthenticatedLegacyUri() {
+        assertEquals(
+                "mongodb://mongo-host:27019",
+                Main.resolveMongoUri(
+                        "",
+                        "mongo-host",
+                        "27019",
+                        null,
+                        null));
+    }
+
+    @Test
+    void incompleteLegacyCredentialsFallBackToUnauthenticatedLegacyUri() {
         assertEquals(
                 "mongodb://mongo-host:27019",
                 Main.resolveMongoUri(
@@ -55,12 +71,5 @@ public class MainTest {
                         "27019",
                         "legacy-user",
                         ""));
-    }
-
-    private static void assertEquals(String expected, String actual) {
-        if (!expected.equals(actual)) {
-            throw new AssertionError(
-                    "expected <" + expected + "> but was <" + actual + ">");
-        }
     }
 }
