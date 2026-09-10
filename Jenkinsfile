@@ -412,23 +412,32 @@ pipeline {
                             // Pre-approval evidence: the release identity the
                             // operator is approving plus a read-only render of
                             // the exact saved plan. No second plan is created.
+                            //
+                            // DEPLOY_TARGET is a pipeline parameter, not part of
+                            // the declarative environment block, so — unlike
+                            // GIT_SHA and the *_IMAGE refs — it is not exported
+                            // into sh steps automatically. Scope it explicitly to
+                            // just this evidence shell from params.DEPLOY_TARGET;
+                            // set -eu still fails closed on any other unset var.
                             timeout(time: 5, unit: 'MINUTES') {
-                                sh '''
-                                    set -eu
-                                    set +x
-                                    echo "OmniVise homelab delivery — pre-approval evidence"
-                                    echo "  Git SHA:         $GIT_SHA"
-                                    echo "  DEPLOY_TARGET:   $DEPLOY_TARGET"
-                                    echo "  Backend image:   $BACKEND_IMAGE"
-                                    echo "  Frontend image:  $FRONTEND_IMAGE"
-                                    echo "  Simulator image: $SIMULATOR_IMAGE"
-                                    echo "  Terraform root:  infra/homelab"
-                                    echo "  HCP workspace:   omnivise-iot-k8s"
-                                    echo "  Saved plan:      infra/homelab/tfplan"
-                                    echo
-                                    echo "Saved Terraform plan (read-only; this exact plan is what apply consumes):"
-                                    terraform show -no-color tfplan
-                                '''
+                                withEnv(["DEPLOY_TARGET=${params.DEPLOY_TARGET}"]) {
+                                    sh '''
+                                        set -eu
+                                        set +x
+                                        echo "OmniVise homelab delivery — pre-approval evidence"
+                                        echo "  Git SHA:         $GIT_SHA"
+                                        echo "  DEPLOY_TARGET:   $DEPLOY_TARGET"
+                                        echo "  Backend image:   $BACKEND_IMAGE"
+                                        echo "  Frontend image:  $FRONTEND_IMAGE"
+                                        echo "  Simulator image: $SIMULATOR_IMAGE"
+                                        echo "  Terraform root:  infra/homelab"
+                                        echo "  HCP workspace:   omnivise-iot-k8s"
+                                        echo "  Saved plan:      infra/homelab/tfplan"
+                                        echo
+                                        echo "Saved Terraform plan (read-only; this exact plan is what apply consumes):"
+                                        terraform show -no-color tfplan
+                                    '''
+                                }
                             }
                         }
 
