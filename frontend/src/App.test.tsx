@@ -34,9 +34,9 @@ afterEach(() => {
 })
 
 describe('App routing', () => {
-  it('renders the Overview placeholder at /', () => {
+  it('renders the Overview page at /', () => {
     renderAt('/')
-    expect(screen.getByText('Fleet overview is coming in a later issue.')).toBeTruthy()
+    expect(screen.getByText('Loading overview…')).toBeTruthy()
   })
 
   it('renders the Devices page at /devices', () => {
@@ -49,9 +49,9 @@ describe('App routing', () => {
     expect(screen.getByText('Loading device…')).toBeTruthy()
   })
 
-  it('renders the Alerts placeholder at /alerts', () => {
+  it('renders the Alerts page at /alerts', () => {
     renderAt('/alerts')
-    expect(screen.getByText('The alert history view is coming in a later issue.')).toBeTruthy()
+    expect(screen.getByText('Loading alerts…')).toBeTruthy()
   })
 
   it('renders a not-found placeholder for an unknown route', () => {
