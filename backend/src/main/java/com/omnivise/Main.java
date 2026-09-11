@@ -6,11 +6,13 @@ import java.util.List;
 import java.util.Map;
 
 import com.omnivise.handler.WebSocketHandler;
+import com.omnivise.model.AlertRule;
 import com.omnivise.model.Device;
 import com.omnivise.model.SensorReading;
 import com.omnivise.service.AlertEvaluator;
 import com.omnivise.service.AlertQuery;
 import com.omnivise.service.AlertRuleService;
+import com.omnivise.service.AlertRulesQuery;
 import com.omnivise.service.AlertService;
 import com.omnivise.service.DeviceService;
 import com.omnivise.service.SensorChangeStreamListener;
@@ -210,6 +212,24 @@ public class Main {
             ctx.json(alertService.find(((AlertQuery.Valid) parsed).query()));
         });
 
+        // Seeded, read-only threshold-rule registry (issue #73), exposed read-only
+        // (issue #89). Without deviceId: all enabled rules. With deviceId: only the
+        // rules applicable to that device (channel-independent device matching).
+        // GET /api/alerts/rules?deviceId=
+        app.get("/api/alerts/rules", ctx -> {
+            AlertRulesQuery.Result parsed = AlertRulesQuery.parse(
+                    ctx.queryParam("deviceId"), deviceService);
+            if (parsed instanceof AlertRulesQuery.Invalid invalid) {
+                ctx.status(400).json(invalid);
+                return;
+            }
+            AlertRulesQuery.Valid valid = (AlertRulesQuery.Valid) parsed;
+            List<AlertRule> rules = valid.deviceId() == null
+                    ? alertRuleService.getRules()
+                    : alertRuleService.getRulesForDevice(valid.deviceId(), valid.deviceKind());
+            ctx.json(rules);
+        });
+
         System.out.println("✅ Server running at http://localhost:" + port);
         System.out.println("\n📡 WebSocket endpoint:");
         System.out.println("   WS   /ws/sensors");
@@ -222,6 +242,7 @@ public class Main {
         System.out.println("   GET  /api/sensors/history?deviceId=&channel=&from=&to=&bucket=1m|5m|1h");
         System.out.println("   GET  /api/alerts?state=firing|resolved&severity=&deviceId=&limit=100");
         System.out.println("   GET  /api/alerts/active?severity=&deviceId=&limit=100");
+        System.out.println("   GET  /api/alerts/rules?deviceId=");
     }
 
     /** Keeps the {@code limit} query parameter within a sane, non-negative range. */

@@ -5,9 +5,13 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
+import java.util.stream.Stream;
 
 import org.bson.Document;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import com.omnivise.model.AlertRule;
 
@@ -172,5 +176,134 @@ class AlertRuleServiceTest {
         Document doc = rule("x");
         doc.remove("threshold");
         assertThrows(IllegalStateException.class, () -> load(doc));
+    }
+
+    // ------------------------------------------------------------------
+    // getRulesForDevice — channel-independent device applicability (issue #89)
+    // ------------------------------------------------------------------
+
+    private static Document deviceRule(String ruleId, String deviceId, String channel) {
+        return rule(ruleId)
+                .append("match", new Document("deviceId", deviceId)
+                        .append("deviceKind", null)
+                        .append("channel", channel));
+    }
+
+    private static Document kindRule(String ruleId, String deviceKind, String channel) {
+        return rule(ruleId)
+                .append("match", new Document("deviceId", null)
+                        .append("deviceKind", deviceKind)
+                        .append("channel", channel));
+    }
+
+    @Test
+    void getRulesForDeviceReturnsBothDeviceKindRulesForARackDevice() {
+        AlertRuleService service = load(
+                kindRule("rack-intake-temp-high", "rack", "intake_temp"),
+                kindRule("rack-humidity-high", "rack", "humidity"),
+                deviceRule("crac-return-temp-high", "crac-1", "return_temp"));
+
+        assertEquals(List.of("rack-intake-temp-high", "rack-humidity-high"),
+                service.getRulesForDevice("rack-a1", "rack").stream().map(AlertRule::ruleId).toList());
+        assertEquals(List.of("rack-intake-temp-high", "rack-humidity-high"),
+                service.getRulesForDevice("rack-a2", "rack").stream().map(AlertRule::ruleId).toList());
+    }
+
+    @Test
+    void getRulesForDeviceReturnsOnlyTheDeviceSpecificRuleForThatExactDevice() {
+        AlertRuleService service = load(
+                deviceRule("crac-return-temp-high", "crac-1", "return_temp"));
+
+        assertEquals(List.of("crac-return-temp-high"),
+                service.getRulesForDevice("crac-1", "crac").stream().map(AlertRule::ruleId).toList());
+    }
+
+    @Test
+    void getRulesForDeviceDoesNotMatchADeviceSpecificRuleToAnotherDeviceOfTheSameKind() {
+        AlertRuleService service = load(
+                deviceRule("ups-input-voltage-low", "ups-1", "input_voltage"));
+
+        assertTrue(service.getRulesForDevice("ups-2", "ups").isEmpty());
+    }
+
+    @Test
+    void getRulesForDeviceReturnsEmptyForADeviceWithNoApplicableRules() {
+        AlertRuleService service = load(
+                kindRule("rack-intake-temp-high", "rack", "intake_temp"),
+                deviceRule("ups-input-voltage-low", "ups-1", "input_voltage"));
+
+        assertTrue(service.getRulesForDevice("pdu-a1", "pdu").isEmpty());
+    }
+
+    // ------------------------------------------------------------------
+    // Canonical #73 seed: the exact five mongo-init.js alert_rules documents
+    // ------------------------------------------------------------------
+
+    private static Document seededRule(String ruleId, String deviceId, String deviceKind, String channel,
+            String operator, int threshold, int clearThreshold, String severity, String description) {
+        return new Document("_id", ruleId)
+                .append("ruleId", ruleId)
+                .append("enabled", true)
+                .append("match", new Document("deviceId", deviceId)
+                        .append("deviceKind", deviceKind)
+                        .append("channel", channel))
+                .append("operator", operator)
+                .append("threshold", threshold)
+                .append("clearThreshold", clearThreshold)
+                .append("severity", severity)
+                .append("description", description);
+    }
+
+    private static final AlertRuleService CANONICAL = load(
+            seededRule("rack-intake-temp-high", null, "rack", "intake_temp", ">", 30, 27, "warning",
+                    "Rack cold-aisle intake temperature is high"),
+            seededRule("rack-humidity-high", null, "rack", "humidity", ">", 60, 55, "warning",
+                    "Rack relative humidity is high"),
+            seededRule("crac-return-temp-high", "crac-1", null, "return_temp", ">", 41, 37, "warning",
+                    "CRAC return-air temperature is high"),
+            seededRule("ups-input-voltage-low", "ups-1", null, "input_voltage", "<", 180, 210, "critical",
+                    "UPS input voltage lost (mains failure)"),
+            seededRule("ups-battery-low", "ups-1", null, "battery_pct", "<", 95, 98, "critical",
+                    "UPS battery charge is low"));
+
+    private static List<String> ids(List<AlertRule> rules) {
+        return rules.stream().map(AlertRule::ruleId).toList();
+    }
+
+    @Test
+    void canonicalSeedGetRulesReturnsExactlyTheFiveRulesInSeedOrder() {
+        assertEquals(List.of(
+                        "rack-intake-temp-high",
+                        "rack-humidity-high",
+                        "crac-return-temp-high",
+                        "ups-input-voltage-low",
+                        "ups-battery-low"),
+                ids(CANONICAL.getRules()));
+    }
+
+    static Stream<Arguments> canonicalDeviceMatrix() {
+        return Stream.of(
+                Arguments.of("rack-a1", "rack", List.of("rack-intake-temp-high", "rack-humidity-high")),
+                Arguments.of("rack-a2", "rack", List.of("rack-intake-temp-high", "rack-humidity-high")),
+                Arguments.of("crac-1", "crac", List.of("crac-return-temp-high")),
+                Arguments.of("ups-1", "ups", List.of("ups-input-voltage-low", "ups-battery-low")),
+                Arguments.of("pdu-a1", "pdu", List.of()));
+    }
+
+    @ParameterizedTest(name = "{0} ({1}) -> {2}")
+    @MethodSource("canonicalDeviceMatrix")
+    void canonicalSeedGetRulesForDeviceReturnsExactlyTheApplicableRulesInSeedOrder(
+            String deviceId, String deviceKind, List<String> expectedRuleIds) {
+        assertEquals(expectedRuleIds, ids(CANONICAL.getRulesForDevice(deviceId, deviceKind)));
+    }
+
+    @Test
+    void getRulesForDeviceNeverExposesDisabledRules() {
+        Document disabled = kindRule("rack-intake-temp-high", "rack", "intake_temp")
+                .append("enabled", false)
+                .append("operator", "!!"); // would be rejected if it were enabled
+        AlertRuleService service = load(disabled);
+
+        assertTrue(service.getRulesForDevice("rack-a1", "rack").isEmpty());
     }
 }

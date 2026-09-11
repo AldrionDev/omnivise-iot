@@ -63,6 +63,31 @@ class AlertRuleTest {
     }
 
     // ------------------------------------------------------------------
+    // Channel-independent device matching (issue #89: GET /api/alerts/rules)
+    // ------------------------------------------------------------------
+
+    @Test
+    void deviceIdRuleMatchesDeviceRegardlessOfChannel() {
+        assertTrue(deviceRule().matchesDevice("ups-1", "ups"));
+    }
+
+    @Test
+    void deviceIdRuleDoesNotMatchDeviceForAnotherDeviceOfTheSameKind() {
+        assertFalse(deviceRule().matchesDevice("ups-2", "ups"));
+    }
+
+    @Test
+    void deviceKindRuleMatchesDeviceForAnyDeviceOfThatKind() {
+        assertTrue(kindRule().matchesDevice("rack-a1", "rack"));
+        assertTrue(kindRule().matchesDevice("rack-a2", "rack"));
+    }
+
+    @Test
+    void deviceKindRuleDoesNotMatchDeviceForADifferentKind() {
+        assertFalse(kindRule().matchesDevice("crac-1", "crac"));
+    }
+
+    // ------------------------------------------------------------------
     // Operator + hysteresis — both boundaries strict, equality is no transition
     // ------------------------------------------------------------------
 

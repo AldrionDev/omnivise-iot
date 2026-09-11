@@ -42,13 +42,19 @@ public record AlertRule(
 
         /** Whether this matcher applies to a reading on the given device/channel. */
         public boolean matches(String readingDeviceId, String readingDeviceKind, String readingChannel) {
-            if (!channel.equals(readingChannel)) {
-                return false;
-            }
+            return channel.equals(readingChannel) && matchesDevice(readingDeviceId, readingDeviceKind);
+        }
+
+        /**
+         * Whether this matcher's device selector ({@code deviceId} or {@code
+         * deviceKind}) applies to the given device, independent of channel (issue
+         * #89: {@code GET /api/alerts/rules}).
+         */
+        public boolean matchesDevice(String candidateDeviceId, String candidateDeviceKind) {
             if (deviceId != null) {
-                return deviceId.equals(readingDeviceId);
+                return deviceId.equals(candidateDeviceId);
             }
-            return deviceKind != null && deviceKind.equals(readingDeviceKind);
+            return deviceKind != null && deviceKind.equals(candidateDeviceKind);
         }
     }
 
@@ -65,6 +71,11 @@ public record AlertRule(
     /** Delegates to {@link Matcher#matches}. */
     public boolean matches(String readingDeviceId, String readingDeviceKind, String readingChannel) {
         return match.matches(readingDeviceId, readingDeviceKind, readingChannel);
+    }
+
+    /** Delegates to {@link Matcher#matchesDevice}. */
+    public boolean matchesDevice(String deviceId, String deviceKind) {
+        return match.matchesDevice(deviceId, deviceKind);
     }
 
     /**
