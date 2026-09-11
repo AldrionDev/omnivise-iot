@@ -45,6 +45,10 @@ function alertResponse(items: AlertEvent[]) {
   return new Response(JSON.stringify(items), { status: 200, headers: { 'X-Alert-Watermark': String(watermark) } })
 }
 
+function alertResponseAt(items: AlertEvent[], watermark: number) {
+  return new Response(JSON.stringify(items), { status: 200, headers: { 'X-Alert-Watermark': String(watermark) } })
+}
+
 function mockFetchJson(alerts: AlertEvent[], devices: Device[] = [RACK_A1, UPS_1]) {
   vi.stubGlobal(
     'fetch',
@@ -79,6 +83,12 @@ function sendAlert(payload: AlertEvent) {
   act(() => {
     currentSocket().triggerMessage(JSON.stringify({ kind: 'alert', payload }))
   })
+}
+
+function alertRequestUrls(): string[] {
+  return vi.mocked(fetch).mock.calls
+    .map(([input]) => String(input))
+    .filter((url) => url.includes('/alerts?'))
 }
 
 function renderPage() {
@@ -151,6 +161,9 @@ describe('AlertsPage filters', () => {
 
     fireEvent.change(screen.getByLabelText('State'), { target: { value: 'resolved' } })
 
+    await screen.findByRole('list')
+    expect(alertRequestUrls().at(-1)).toContain('state=resolved')
+    expect(alertRequestUrls().at(-1)).toContain('limit=500')
     expect(rows().queryByText(/Rack A1/)).toBeNull()
     expect(rows().getByText(/UPS 1/)).toBeTruthy()
   })
@@ -161,6 +174,8 @@ describe('AlertsPage filters', () => {
 
     fireEvent.change(screen.getByLabelText('Severity'), { target: { value: 'critical' } })
 
+    await screen.findByRole('list')
+    expect(alertRequestUrls().at(-1)).toContain('severity=critical')
     expect(rows().queryByText(/Rack A1/)).toBeNull()
     expect(rows().getByText(/UPS 1/)).toBeTruthy()
   })
@@ -171,6 +186,8 @@ describe('AlertsPage filters', () => {
 
     fireEvent.change(screen.getByLabelText('Device'), { target: { value: 'ups-1' } })
 
+    await screen.findByRole('list')
+    expect(alertRequestUrls().at(-1)).toContain('deviceId=ups-1')
     expect(rows().queryByText(/Rack A1/)).toBeNull()
     expect(rows().getByText(/UPS 1/)).toBeTruthy()
   })
@@ -180,9 +197,13 @@ describe('AlertsPage filters', () => {
     await screen.findByRole('list')
 
     fireEvent.change(screen.getByLabelText('State'), { target: { value: 'resolved' } })
+    await screen.findByRole('list')
     fireEvent.change(screen.getByLabelText('Severity'), { target: { value: 'critical' } })
+    await screen.findByRole('list')
     fireEvent.change(screen.getByLabelText('Device'), { target: { value: 'ups-1' } })
 
+    await screen.findByRole('list')
+    expect(alertRequestUrls().at(-1)).toBe('/alerts?limit=500&state=resolved&severity=critical&deviceId=ups-1')
     expect(rows().getByText(/UPS 1/)).toBeTruthy()
     expect(rows().queryByText(/Rack A1/)).toBeNull()
   })
@@ -195,6 +216,16 @@ describe('AlertsPage filters', () => {
     fireEvent.change(screen.getByLabelText('Severity'), { target: { value: 'warning' } })
 
     expect(await screen.findByText('No matching alerts')).toBeTruthy()
+  })
+
+  it('does not use client-side latest-500 filtering for an active filter', async () => {
+    renderPage()
+    await screen.findByRole('list')
+
+    fireEvent.change(screen.getByLabelText('State'), { target: { value: 'firing' } })
+    await screen.findByRole('list')
+
+    expect(alertRequestUrls().at(-1)).toBe('/alerts?limit=500&state=firing')
   })
 })
 
@@ -238,6 +269,67 @@ describe('AlertsPage live updates', () => {
     await waitFor(() => expect(rows().getByText(/UPS 1/)).toBeTruthy())
     expect(rows().getAllByRole('listitem')).toHaveLength(2)
   })
+
+  it('shows a live firing alert that matches the active filters', async () => {
+    mockFetchJson([])
+    renderPage()
+    await screen.findByText('No matching alerts')
+    fireEvent.change(screen.getByLabelText('Severity'), { target: { value: 'critical' } })
+    await screen.findByText('No matching alerts')
+    currentSocket().triggerOpen()
+
+    sendAlert(alert({ id: 'matching', severity: 'critical', state: 'firing' }))
+
+    await waitFor(() => expect(rows().getByText(/Rack A1/)).toBeTruthy())
+  })
+
+  it('does not show a live firing alert that misses the active filters', async () => {
+    mockFetchJson([])
+    renderPage()
+    await screen.findByText('No matching alerts')
+    fireEvent.change(screen.getByLabelText('Severity'), { target: { value: 'critical' } })
+    await screen.findByText('No matching alerts')
+    currentSocket().triggerOpen()
+
+    sendAlert(alert({ id: 'not-matching', severity: 'warning', state: 'firing' }))
+
+    await waitFor(() => expect(screen.getByText('No matching alerts')).toBeTruthy())
+  })
+
+  it('removes a live resolved alert immediately when the firing filter is active', async () => {
+    mockFetchJson([alert({ id: 'lifecycle', state: 'firing' })])
+    renderPage()
+    await screen.findByRole('list')
+    fireEvent.change(screen.getByLabelText('State'), { target: { value: 'firing' } })
+    await screen.findByRole('list')
+    currentSocket().triggerOpen()
+
+    sendAlert(alert({ id: 'lifecycle', sequence: 4, state: 'resolved', resolvedAt: '2026-09-11T08:05:00Z' }))
+
+    await waitFor(() => expect(screen.getByText('No matching alerts')).toBeTruthy())
+  })
+
+  it('shows exactly one resolved lifecycle row with the resolved filter', async () => {
+    mockFetchJson([])
+    renderPage()
+    await screen.findByText('No matching alerts')
+    fireEvent.change(screen.getByLabelText('State'), { target: { value: 'resolved' } })
+    await screen.findByText('No matching alerts')
+
+    sendAlert(alert({ id: 'resolved-lifecycle', sequence: 20, state: 'firing' }))
+    await waitFor(() => expect(screen.getByText('No matching alerts')).toBeTruthy())
+
+    sendAlert(alert({
+      id: 'resolved-lifecycle',
+      sequence: 21,
+      state: 'resolved',
+      resolvedAt: '2026-09-11T08:05:00Z',
+    }))
+
+    await waitFor(() => expect(rows().getAllByRole('listitem')).toHaveLength(1))
+    expect(rows().getByText(/resolved/)).toBeTruthy()
+    expect(rows().queryByText(/firing/)).toBeNull()
+  })
 })
 
 describe('AlertsPage reconnect resync', () => {
@@ -261,6 +353,26 @@ describe('AlertsPage reconnect resync', () => {
     currentSocket().triggerOpen()
 
     await vi.waitFor(() => expect(countMatching('/alerts?limit=')).toBe(alertsCallsBefore + 1))
+  })
+
+  it('refetches the currently active filters after reconnect', async () => {
+    mockFetchJson([])
+    renderPage()
+    await vi.waitFor(() => expect(screen.getByText('No matching alerts')).toBeTruthy())
+    fireEvent.change(screen.getByLabelText('State'), { target: { value: 'firing' } })
+    await vi.waitFor(() => expect(screen.getByText('No matching alerts')).toBeTruthy())
+
+    const filteredUrl = '/alerts?limit=500&state=firing'
+    expect(alertRequestUrls().at(-1)).toBe(filteredUrl)
+    const callsBefore = alertRequestUrls().filter((url) => url === filteredUrl).length
+
+    const firstSocket = currentSocket()
+    firstSocket.triggerOpen()
+    firstSocket.triggerClose()
+    await vi.advanceTimersByTimeAsync(1000)
+    currentSocket().triggerOpen()
+
+    await vi.waitFor(() => expect(alertRequestUrls().filter((url) => url === filteredUrl)).toHaveLength(callsBefore + 1))
   })
 })
 
@@ -303,6 +415,79 @@ describe('AlertsPage snapshot-vs-live-alert race', () => {
     resolveAlerts([])
 
     await screen.findByRole('list')
+    expect(rows().getByText(/Rack A1/)).toBeTruthy()
+  })
+
+  it('ignores a stale response for filter A after filter B becomes active', async () => {
+    let resolveFilterA!: (response: Response) => void
+    let resolveFilterB!: (response: Response) => void
+    let alertsCall = 0
+    vi.stubGlobal('fetch', vi.fn((input: string | URL) => {
+      const url = String(input)
+      if (url.includes('/devices')) {
+        return Promise.resolve(new Response(JSON.stringify([RACK_A1, UPS_1]), { status: 200 }))
+      }
+      if (!url.includes('/alerts?')) throw new Error(`unexpected fetch: ${url}`)
+      alertsCall++
+      if (alertsCall === 1) return Promise.resolve(alertResponse([]))
+      return new Promise<Response>((resolve) => {
+        if (url.includes('state=firing')) resolveFilterA = resolve
+        else resolveFilterB = resolve
+      })
+    }))
+    renderPage()
+    await screen.findByText('No matching alerts')
+
+    fireEvent.change(screen.getByLabelText('State'), { target: { value: 'firing' } })
+    fireEvent.change(screen.getByLabelText('State'), { target: { value: 'resolved' } })
+
+    resolveFilterB(alertResponse([alert({ id: 'resolved', state: 'resolved', resolvedAt: '2026-09-11T08:05:00Z' })]))
+    await screen.findByText(/resolved/)
+    resolveFilterA(alertResponse([alert({ id: 'firing', state: 'firing' })]))
+
+    await waitFor(() => expect(screen.getByText(/resolved/)).toBeTruthy())
+    expect(screen.queryByText(/firing/)).toBeNull()
+  })
+
+  async function startFilteredSnapshotRace() {
+    let resolveFiltered!: (response: Response) => void
+    let alertsCall = 0
+    vi.stubGlobal('fetch', vi.fn((input: string | URL) => {
+      const url = String(input)
+      if (url.includes('/devices')) {
+        return Promise.resolve(new Response(JSON.stringify([RACK_A1, UPS_1]), { status: 200 }))
+      }
+      if (!url.includes('/alerts?')) throw new Error(`unexpected fetch: ${url}`)
+      alertsCall++
+      if (alertsCall === 1) return Promise.resolve(alertResponseAt([], 0))
+      return new Promise<Response>((resolve) => {
+        resolveFiltered = resolve
+      })
+    }))
+    renderPage()
+    await screen.findByText('No matching alerts')
+    fireEvent.change(screen.getByLabelText('State'), { target: { value: 'firing' } })
+    await vi.waitFor(() => expect(alertRequestUrls().at(-1)).toBe('/alerts?limit=500&state=firing'))
+    return resolveFiltered
+  }
+
+  it('does not replay a filtered live alert at or below the snapshot watermark', async () => {
+    const resolveFiltered = await startFilteredSnapshotRace()
+
+    sendAlert(alert({ id: 'covered', sequence: 10, state: 'firing' }))
+    resolveFiltered(alertResponseAt([], 10))
+
+    await screen.findByText('No matching alerts')
+    expect(screen.queryByRole('list')).toBeNull()
+  })
+
+  it('replays a matching filtered live alert above the snapshot watermark', async () => {
+    const resolveFiltered = await startFilteredSnapshotRace()
+
+    sendAlert(alert({ id: 'newer', sequence: 11, state: 'firing' }))
+    resolveFiltered(alertResponseAt([], 10))
+
+    await waitFor(() => expect(rows().getAllByRole('listitem')).toHaveLength(1))
     expect(rows().getByText(/Rack A1/)).toBeTruthy()
   })
 })
