@@ -53,6 +53,47 @@ export interface AlertEvent {
   resolvedAt: string | null
 }
 
+export interface HistoryPoint {
+  t: string
+  avg: number | null
+  min: number | null
+  max: number | null
+}
+
+export interface SensorHistory {
+  deviceId: string
+  channel: string
+  unit: string
+  bucket: string
+  points: HistoryPoint[]
+}
+
+export type RuleOperator = '>' | '<'
+
+/**
+ * Exactly one of {@link AlertRuleMatch.deviceId} / {@link AlertRuleMatch.deviceKind}
+ * is non-null, mirroring the backend's AlertRule.Matcher (issue #73/#89).
+ */
+export interface AlertRuleMatch {
+  deviceId: string | null
+  deviceKind: string | null
+  channel: string
+}
+
+/**
+ * A seeded, read-only threshold rule from `GET /api/alerts/rules` (issue #89).
+ * Deliberately has no `description` field -- the backend does not return one.
+ */
+export interface AlertRule {
+  ruleId: string
+  enabled: boolean
+  match: AlertRuleMatch
+  operator: RuleOperator
+  threshold: number
+  clearThreshold: number
+  severity: AlertSeverity
+}
+
 export interface ReadingEnvelope {
   kind: 'reading'
   payload: Reading

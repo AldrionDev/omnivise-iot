@@ -20,6 +20,13 @@ beforeEach(() => {
   document.documentElement.removeAttribute('data-theme')
   MockWebSocket.reset()
   vi.stubGlobal('WebSocket', MockWebSocket)
+  // Devices/Device detail now fetch real data (#75); a never-resolving fetch
+  // keeps their loading state stable for these routing-only assertions
+  // without needing to mock full REST responses (covered by their own tests).
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(() => new Promise(() => {})),
+  )
 })
 
 afterEach(() => {
@@ -32,14 +39,14 @@ describe('App routing', () => {
     expect(screen.getByText('Fleet overview is coming in a later issue.')).toBeTruthy()
   })
 
-  it('renders the Devices placeholder at /devices', () => {
+  it('renders the Devices page at /devices', () => {
     renderAt('/devices')
-    expect(screen.getByText('The device registry view is coming in a later issue.')).toBeTruthy()
+    expect(screen.getByText('Loading devices…')).toBeTruthy()
   })
 
-  it('renders the Device detail placeholder at /devices/:deviceId', () => {
+  it('renders the Device detail page at /devices/:deviceId', () => {
     renderAt('/devices/rack-a1')
-    expect(screen.getByText('Device: rack-a1')).toBeTruthy()
+    expect(screen.getByText('Loading device…')).toBeTruthy()
   })
 
   it('renders the Alerts placeholder at /alerts', () => {
