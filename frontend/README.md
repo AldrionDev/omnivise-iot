@@ -109,7 +109,7 @@ by the image entrypoint.
 
 | Variable | Used by | Purpose |
 | --- | --- | --- |
-| `VITE_API_URL` | dev build only | Backend REST origin for local `npm run dev` |
+| `VITE_API_URL` | built frontend bundle (dev & prod) | Frontend REST API base URL, including the `/api` prefix (e.g. `http://localhost:8080/api`) -- `lib/api.ts` appends each call's path (`/devices`, `/alerts/active`, ...) directly onto it |
 | `VITE_WS_URL` | dev build only | Explicit WebSocket URL override; when unset, `useLiveStream` derives `ws(s)://<current origin>/ws/sensors` from the browser location |
 | `BACKEND_UPSTREAM` | Nginx (runtime) | Backend `host:port` the container's reverse proxy targets |
 
