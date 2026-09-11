@@ -6,6 +6,12 @@ dist/
 dist-ssr/
 *.local
 
+# Vite dependency pre-bundling cache
+.vite/
+
+# TypeScript incremental build cache
+*.tsbuildinfo
+
 # Environment files (local overrides)
 .env.local
 .env.*.local
