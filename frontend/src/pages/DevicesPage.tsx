@@ -1,15 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router'
 import { Badge, type BadgeVariant } from '../components/Badge'
 import { Button } from '../components/Button'
 import { EmptyState } from '../components/EmptyState'
 import { Select } from '../components/Select'
-import { useLiveAlertTransitions } from '../hooks/useLiveAlertTransitions'
-import { useReconnectResync } from '../hooks/useReconnectResync'
-import { mergeActiveAlert, replayActiveAlerts } from '../lib/alertMerge'
+import { useAlertsSnapshot } from '../hooks/useAlertsSnapshot'
 import { fetchJson } from '../lib/api'
 import { deriveDeviceStatus, type DeviceStatus } from '../lib/deviceStatus'
-import type { AlertEvent, Device } from '../types/domain'
+import type { Device } from '../types/domain'
 
 const ALL_FILTER = 'all'
 
@@ -17,11 +15,6 @@ type DevicesState =
   | { status: 'loading' }
   | { status: 'error' }
   | { status: 'loaded'; devices: Device[] }
-
-type ActiveAlertsState =
-  | { status: 'loading' }
-  | { status: 'error' }
-  | { status: 'loaded'; items: AlertEvent[] }
 
 const STATUS_BADGE_VARIANT: Record<DeviceStatus, BadgeVariant> = {
   ok: 'ok',
@@ -35,19 +28,11 @@ function uniqueSorted(values: string[]): string[] {
 
 export function DevicesPage() {
   const [devicesState, setDevicesState] = useState<DevicesState>({ status: 'loading' })
-  const [activeAlertsState, setActiveAlertsState] = useState<ActiveAlertsState>({ status: 'loading' })
   const [reloadToken, setReloadToken] = useState(0)
   const [kind, setKind] = useState(ALL_FILTER)
   const [location, setLocation] = useState(ALL_FILTER)
   const [status, setStatus] = useState(ALL_FILTER)
-  const resyncToken = useReconnectResync()
-
-  // Buffer for live alert transitions arriving while GET /api/alerts/active
-  // is in flight (issue #75 M1): the backend can answer that query before an
-  // alert already delivered over the WebSocket was inserted. Replayed onto
-  // the snapshot once it resolves; see DeviceDetailPage for the fuller note.
-  const activeAlertsBufferRef = useRef<AlertEvent[]>([])
-  const activeAlertsInFlightRef = useRef(true)
+  const activeAlertsState = useAlertsSnapshot('/alerts/active', 'active', 20, undefined, reloadToken)
 
   useEffect(() => {
     let current = true
@@ -60,57 +45,6 @@ export function DevicesPage() {
       current = false
     }
   }, [reloadToken])
-
-  useEffect(() => {
-    let current = true
-    activeAlertsBufferRef.current = []
-    activeAlertsInFlightRef.current = true
-
-    fetchJson<AlertEvent[]>('/alerts/active')
-      .then((items) => {
-        if (!current) {
-          return
-        }
-        const replayed = replayActiveAlerts(items, activeAlertsBufferRef.current)
-        activeAlertsBufferRef.current = []
-        activeAlertsInFlightRef.current = false
-        setActiveAlertsState({ status: 'loaded', items: replayed })
-      })
-      .catch(() => {
-        if (!current) {
-          return
-        }
-        // Snapshot-and-clear happens here, not inside the setState updater
-        // (see DeviceDetailPage's equivalent catch for why: a setState
-        // updater must be pure, and React may invoke it more than once).
-        const buffered = activeAlertsBufferRef.current
-        activeAlertsBufferRef.current = []
-        activeAlertsInFlightRef.current = false
-        setActiveAlertsState((prev) =>
-          prev.status === 'loaded'
-            ? { status: 'loaded', items: replayActiveAlerts(prev.items, buffered) }
-            : { status: 'error' },
-        )
-      })
-
-    return () => {
-      current = false
-    }
-    // resyncToken: after a reconnect, #74 clears its live alert buffer (a
-    // transition may have been missed while down) -- re-fetch the
-    // authoritative active-alerts snapshot. The device registry itself is
-    // not WS-driven, so it deliberately does not refetch here.
-  }, [reloadToken, resyncToken])
-
-  useLiveAlertTransitions((alert) => {
-    if (activeAlertsInFlightRef.current) {
-      activeAlertsBufferRef.current.push(alert)
-      return
-    }
-    setActiveAlertsState((prev) =>
-      prev.status !== 'loaded' ? prev : { status: 'loaded', items: mergeActiveAlert(prev.items, alert) },
-    )
-  })
 
   const kindOptions = useMemo(
     () => (devicesState.status === 'loaded' ? uniqueSorted(devicesState.devices.map((d) => d.kind)) : []),
@@ -161,7 +95,6 @@ export function DevicesPage() {
             variant="secondary"
             onClick={() => {
               setDevicesState({ status: 'loading' })
-              setActiveAlertsState({ status: 'loading' })
               setReloadToken((t) => t + 1)
             }}
           >

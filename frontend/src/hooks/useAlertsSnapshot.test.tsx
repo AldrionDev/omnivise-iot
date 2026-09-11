@@ -6,8 +6,9 @@ import { LiveStreamProvider } from './LiveStreamContext'
 import { MockWebSocket } from '../test/MockWebSocket'
 import type { AlertEvent } from '../types/domain'
 
-function alert(overrides: Partial<AlertEvent>): AlertEvent {
+function alert(sequence: number, overrides: Partial<AlertEvent> = {}): AlertEvent {
   return {
+    sequence,
     id: 'a1',
     ruleId: 'r1',
     deviceId: 'rack-a1',
@@ -22,18 +23,31 @@ function alert(overrides: Partial<AlertEvent>): AlertEvent {
   }
 }
 
-function currentSocket(): MockWebSocket {
+function response(items: AlertEvent[], watermark: number) {
+  return new Response(JSON.stringify(items), {
+    status: 200,
+    headers: { 'X-Alert-Watermark': String(watermark) },
+  })
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
+function currentSocket() {
   const socket = MockWebSocket.instances.at(-1)
-  if (!socket) {
-    throw new Error('no MockWebSocket instance was created')
-  }
+  if (!socket) throw new Error('no MockWebSocket instance was created')
   return socket
 }
 
 function sendAlert(payload: AlertEvent) {
-  act(() => {
-    currentSocket().triggerMessage(JSON.stringify({ kind: 'alert', payload }))
-  })
+  act(() => currentSocket().triggerMessage(JSON.stringify({ kind: 'alert', payload })))
 }
 
 function wrapper({ children }: { children: ReactNode }) {
@@ -41,11 +55,7 @@ function wrapper({ children }: { children: ReactNode }) {
 }
 
 function strictWrapper({ children }: { children: ReactNode }) {
-  return (
-    <StrictMode>
-      <LiveStreamProvider>{children}</LiveStreamProvider>
-    </StrictMode>
-  )
+  return <StrictMode><LiveStreamProvider>{children}</LiveStreamProvider></StrictMode>
 }
 
 beforeEach(() => {
@@ -55,147 +65,212 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals()
+  vi.useRealTimers()
 })
 
-describe('useAlertsSnapshot', () => {
-  it('loads the snapshot from the given path', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(() => Promise.resolve(new Response(JSON.stringify([alert({ id: 'a1' })]), { status: 200 }))),
-    )
-
+describe('useAlertsSnapshot synchronization', () => {
+  it('rejects malformed snapshots without installing them', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(JSON.stringify([]), { status: 200 }))))
     const { result } = renderHook(() => useAlertsSnapshot('/alerts/active', 'active'), { wrapper })
-
-    await waitFor(() => expect(result.current).toEqual({ status: 'loaded', items: [alert({ id: 'a1' })] }))
-  })
-
-  it('reports an error state when the initial fetch fails', async () => {
-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response('boom', { status: 500 }))))
-
-    const { result } = renderHook(() => useAlertsSnapshot('/alerts/active', 'active'), { wrapper })
-
     await waitFor(() => expect(result.current).toEqual({ status: 'error' }))
   })
 
-  describe('kind="active"', () => {
-    it('upserts a firing alert live and removes it once resolved', async () => {
-      vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(JSON.stringify([]), { status: 200 }))))
-      const { result } = renderHook(() => useAlertsSnapshot('/alerts/active', 'active'), { wrapper })
-      await waitFor(() => expect(result.current).toEqual({ status: 'loaded', items: [] }))
-      currentSocket().triggerOpen()
-
-      sendAlert(alert({ id: 'c1', state: 'firing' }))
-      await waitFor(() => expect(result.current).toEqual({ status: 'loaded', items: [alert({ id: 'c1', state: 'firing' })] }))
-
-      sendAlert(alert({ id: 'c1', state: 'resolved', resolvedAt: '2026-09-11T08:05:00Z' }))
-      await waitFor(() => expect(result.current).toEqual({ status: 'loaded', items: [] }))
-    })
-
-    it('does not lose a firing alert that arrives while the initial snapshot is loading', async () => {
-      let resolveActive: ((value: Response) => void) | undefined
-      const pending = new Promise<Response>((resolve) => {
-        resolveActive = resolve
-      })
-      vi.stubGlobal('fetch', vi.fn(() => pending))
-
-      const { result } = renderHook(() => useAlertsSnapshot('/alerts/active', 'active'), { wrapper })
-      expect(result.current).toEqual({ status: 'loading' })
-      currentSocket().triggerOpen()
-
-      sendAlert(alert({ id: 'live-1', state: 'firing' }))
-
-      act(() => resolveActive?.(new Response(JSON.stringify([]), { status: 200 })))
-
-      await waitFor(() => expect(result.current).toEqual({ status: 'loaded', items: [alert({ id: 'live-1', state: 'firing' })] }))
-    })
+  it('does not lose A journal entries when B supersedes A and then fails', async () => {
+    const requestA = deferred<Response>()
+    const requestB = deferred<Response>()
+    let call = 0
+    vi.stubGlobal('fetch', vi.fn(() => {
+      call++
+      if (call === 1) return Promise.resolve(response([], 0))
+      return call === 2 ? requestA.promise : requestB.promise
+    }))
+    const { result, rerender } = renderHook(
+      ({ refresh }) => useAlertsSnapshot('/alerts/active', 'active', 20, undefined, refresh),
+      { wrapper, initialProps: { refresh: 0 } },
+    )
+    await waitFor(() => expect(result.current.status).toBe('loaded'))
+    rerender({ refresh: 1 })
+    sendAlert(alert(10))
+    rerender({ refresh: 2 })
+    requestA.resolve(response([], 10))
+    requestB.reject(new Error('network'))
+    await waitFor(() => expect(result.current).toEqual({ status: 'loaded', items: [alert(10)] }))
   })
 
-  describe('kind="recent"', () => {
-    it('prepends a genuinely new id and updates an existing id in place without duplicating', async () => {
-      vi.stubGlobal(
-        'fetch',
-        vi.fn(() => Promise.resolve(new Response(JSON.stringify([alert({ id: 'old' })]), { status: 200 }))),
-      )
-      const { result } = renderHook(() => useAlertsSnapshot('/alerts', 'recent', 20), { wrapper })
-      await waitFor(() => expect(result.current).toEqual({ status: 'loaded', items: [alert({ id: 'old' })] }))
-      currentSocket().triggerOpen()
-
-      sendAlert(alert({ id: 'new', state: 'firing' }))
-      await waitFor(() =>
-        expect(result.current).toEqual({
-          status: 'loaded',
-          items: [alert({ id: 'new', state: 'firing' }), alert({ id: 'old' })],
-        }),
-      )
-
-      sendAlert(alert({ id: 'old', state: 'resolved', resolvedAt: '2026-09-11T08:05:00Z' }))
-      await waitFor(() =>
-        expect(result.current).toEqual({
-          status: 'loaded',
-          items: [alert({ id: 'new', state: 'firing' }), alert({ id: 'old', state: 'resolved', resolvedAt: '2026-09-11T08:05:00Z' })],
-        }),
-      )
+  it('delivers more than twenty transitions received in one batch', async () => {
+    const initial = deferred<Response>()
+    vi.stubGlobal('fetch', vi.fn(() => initial.promise))
+    const { result } = renderHook(() => useAlertsSnapshot('/alerts/active', 'active'), { wrapper })
+    act(() => {
+      for (let sequence = 1; sequence <= 25; sequence++) {
+        currentSocket().triggerMessage(JSON.stringify({
+          kind: 'alert',
+          payload: alert(sequence, { id: `a${sequence}` }),
+        }))
+      }
     })
+    initial.resolve(response([], 0))
+    await waitFor(() => expect(result.current.status === 'loaded' && result.current.items).toHaveLength(25))
   })
 
-  describe('reconnect resync', () => {
-    beforeEach(() => vi.useFakeTimers())
-    afterEach(() => vi.useRealTimers())
+  it('compacts retained tombstones with one event-driven authoritative resync', async () => {
+    const compaction = deferred<Response>()
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(response([], 0))
+      .mockReturnValueOnce(compaction.promise)
+    vi.stubGlobal('fetch', fetchMock)
+    const { result } = renderHook(() => useAlertsSnapshot('/alerts/active', 'active'), { wrapper })
+    await waitFor(() => expect(result.current.status).toBe('loaded'))
 
-    it('refetches the snapshot exactly once after a reconnect', async () => {
-      vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(JSON.stringify([]), { status: 200 }))))
-      const { result } = renderHook(() => useAlertsSnapshot('/alerts/active', 'active'), { wrapper })
-      await vi.waitFor(() => expect(result.current).toEqual({ status: 'loaded', items: [] }))
-
-      const callsBefore = vi.mocked(fetch).mock.calls.length
-      const firstSocket = currentSocket()
-      firstSocket.triggerOpen()
-      firstSocket.triggerClose()
-      await vi.advanceTimersByTimeAsync(1000)
-      currentSocket().triggerOpen()
-
-      await vi.waitFor(() => expect(vi.mocked(fetch).mock.calls.length).toBe(callsBefore + 1))
+    act(() => {
+      for (let sequence = 1; sequence <= 1001; sequence++) {
+        currentSocket().triggerMessage(JSON.stringify({
+          kind: 'alert',
+          payload: alert(sequence, {
+            id: `resolved-${sequence}`,
+            state: 'resolved',
+            resolvedAt: '2026-09-11T08:05:00Z',
+          }),
+        }))
+      }
     })
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    compaction.resolve(response([], 1001))
+    await waitFor(() => expect(result.current).toEqual({ status: 'loaded', items: [] }))
+    expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
-  describe('resync failure preserves buffered alerts under StrictMode (issue #75 B1)', () => {
-    it('keeps a firing alert reflected after a resync that then fails', async () => {
-      let resyncArmed = false
-      let rejectResync: ((reason?: unknown) => void) | undefined
-      vi.stubGlobal(
-        'fetch',
-        vi.fn(() => {
-          if (!resyncArmed) {
-            return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }))
-          }
-          return new Promise<Response>((_resolve, reject) => {
-            rejectResync = reject
-          })
-        }),
-      )
+  it('allows the next transition to retry a failed compaction without polling', async () => {
+    const failedCompaction = deferred<Response>()
+    const recoveredCompaction = deferred<Response>()
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(response([], 0))
+      .mockReturnValueOnce(failedCompaction.promise)
+      .mockReturnValueOnce(recoveredCompaction.promise)
+    vi.stubGlobal('fetch', fetchMock)
+    const { result } = renderHook(() => useAlertsSnapshot('/alerts/active', 'active'), { wrapper })
+    await waitFor(() => expect(result.current.status).toBe('loaded'))
 
-      const { result } = renderHook(() => useAlertsSnapshot('/alerts/active', 'active'), {
-        wrapper: strictWrapper,
-      })
-      await waitFor(() => expect(result.current).toEqual({ status: 'loaded', items: [] }))
-
-      vi.useFakeTimers()
-      const firstSocket = currentSocket()
-      act(() => firstSocket.triggerOpen())
-      act(() => firstSocket.triggerClose())
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(1000)
-      })
-      resyncArmed = true
-      act(() => currentSocket().triggerOpen())
-      vi.useRealTimers()
-
-      sendAlert(alert({ id: 'live-b1', state: 'firing' }))
-      act(() => rejectResync?.(new Error('network error')))
-
-      await waitFor(() =>
-        expect(result.current).toEqual({ status: 'loaded', items: [alert({ id: 'live-b1', state: 'firing' })] }),
-      )
+    act(() => {
+      for (let sequence = 1; sequence <= 1001; sequence++) {
+        currentSocket().triggerMessage(JSON.stringify({
+          kind: 'alert',
+          payload: alert(sequence, {
+            id: `resolved-${sequence}`,
+            state: 'resolved',
+            resolvedAt: '2026-09-11T08:05:00Z',
+          }),
+        }))
+      }
     })
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    failedCompaction.reject(new Error('network'))
+    await waitFor(() => expect(result.current).toEqual({ status: 'loaded', items: [] }))
+
+    sendAlert(alert(1002, {
+      id: 'resolved-1002',
+      state: 'resolved',
+      resolvedAt: '2026-09-11T08:05:00Z',
+    }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
+    recoveredCompaction.resolve(response([], 1002))
+    await waitFor(() => expect(result.current).toEqual({ status: 'loaded', items: [] }))
+  })
+
+  it('does not resurrect firing older than a resolved snapshot, even without a correcting WS frame', async () => {
+    const initial = deferred<Response>()
+    vi.stubGlobal('fetch', vi.fn(() => initial.promise))
+    const { result } = renderHook(() => useAlertsSnapshot('/alerts/active', 'active'), { wrapper })
+    sendAlert(alert(4))
+    act(() => currentSocket().triggerClose())
+    initial.resolve(response([], 5))
+    await waitFor(() => expect(result.current).toEqual({ status: 'loaded', items: [] }))
+  })
+
+  it('keeps firing and resolved for the same id as exactly one resolved recent row', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(response([], 0))))
+    const { result } = renderHook(() => useAlertsSnapshot('/alerts', 'recent'), { wrapper })
+    await waitFor(() => expect(result.current.status).toBe('loaded'))
+    sendAlert(alert(2, { state: 'resolved', resolvedAt: '2026-09-11T08:05:00Z' }))
+    sendAlert(alert(1))
+    await waitFor(() => expect(result.current).toEqual({
+      status: 'loaded',
+      items: [alert(2, { state: 'resolved', resolvedAt: '2026-09-11T08:05:00Z' })],
+    }))
+  })
+
+  it('rejects a lower watermark before it mutates loaded state or journal', async () => {
+    const stale = deferred<Response>()
+    const next = deferred<Response>()
+    let call = 0
+    vi.stubGlobal('fetch', vi.fn(() => {
+      call++
+      if (call === 1) return Promise.resolve(response([], 10))
+      return call === 2 ? stale.promise : next.promise
+    }))
+    const { result, rerender } = renderHook(
+      ({ refresh }) => useAlertsSnapshot('/alerts/active', 'active', 20, undefined, refresh),
+      { wrapper, initialProps: { refresh: 0 } },
+    )
+    await waitFor(() => expect(result.current.status).toBe('loaded'))
+    sendAlert(alert(12))
+    rerender({ refresh: 1 })
+    stale.resolve(response([], 9))
+    await waitFor(() => expect(result.current).toEqual({ status: 'loaded', items: [alert(12)] }))
+    rerender({ refresh: 2 })
+    next.resolve(response([], 10))
+    await waitFor(() => expect(result.current).toEqual({ status: 'loaded', items: [alert(12)] }))
+  })
+
+  it('preserves live-patched state and the unconsumed journal after failed resync', async () => {
+    const failed = deferred<Response>()
+    const recovered = deferred<Response>()
+    let call = 0
+    vi.stubGlobal('fetch', vi.fn(() => {
+      call++
+      if (call === 1) return Promise.resolve(response([], 0))
+      return call === 2 ? failed.promise : recovered.promise
+    }))
+    const { result, rerender } = renderHook(
+      ({ refresh }) => useAlertsSnapshot('/alerts/active', 'active', 20, undefined, refresh),
+      { wrapper, initialProps: { refresh: 0 } },
+    )
+    await waitFor(() => expect(result.current.status).toBe('loaded'))
+    rerender({ refresh: 1 })
+    sendAlert(alert(3))
+    failed.reject(new Error('network'))
+    await waitFor(() => expect(result.current).toEqual({ status: 'loaded', items: [alert(3)] }))
+    rerender({ refresh: 2 })
+    recovered.resolve(response([], 0))
+    await waitFor(() => expect(result.current).toEqual({ status: 'loaded', items: [alert(3)] }))
+  })
+
+  it('isolates state, journal, and stale responses when device scope changes', async () => {
+    const rackA = deferred<Response>()
+    const rackB = deferred<Response>()
+    vi.stubGlobal('fetch', vi.fn((input: string | URL) => String(input).includes('rack-a1') ? rackA.promise : rackB.promise))
+    const { result, rerender } = renderHook(
+      ({ deviceId }) => useAlertsSnapshot(`/alerts/active?deviceId=${deviceId}`, 'active', 20, deviceId),
+      { wrapper, initialProps: { deviceId: 'rack-a1' } },
+    )
+    sendAlert(alert(1, { deviceId: 'rack-a1' }))
+    rerender({ deviceId: 'rack-b1' })
+    sendAlert(alert(2, { id: 'b1', deviceId: 'rack-b1' }))
+    rackA.resolve(response([alert(3, { deviceId: 'rack-a1' })], 3))
+    rackB.resolve(response([], 0))
+    await waitFor(() => expect(result.current).toEqual({
+      status: 'loaded',
+      items: [alert(2, { id: 'b1', deviceId: 'rack-b1' })],
+    }))
+  })
+
+  it('remains lossless with pure updaters under StrictMode', async () => {
+    const initial = deferred<Response>()
+    vi.stubGlobal('fetch', vi.fn(() => initial.promise))
+    const { result } = renderHook(() => useAlertsSnapshot('/alerts/active', 'active'), { wrapper: strictWrapper })
+    sendAlert(alert(1))
+    initial.resolve(response([], 0))
+    await waitFor(() => expect(result.current).toEqual({ status: 'loaded', items: [alert(1)] }))
   })
 })

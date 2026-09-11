@@ -1,8 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
 import { useLiveAlertTransitions } from './useLiveAlertTransitions'
 import { useReconnectResync } from './useReconnectResync'
-import { mergeActiveAlert, mergeRecentAlert, replayActiveAlerts, replayRecentAlerts } from '../lib/alertMerge'
-import { fetchJson } from '../lib/api'
+import {
+  mergeAlert,
+  replayAlerts,
+  selectActiveAlerts,
+  selectRecentAlerts,
+  type AlertStore,
+} from '../lib/alertMerge'
+import { fetchAlertsSnapshot } from '../lib/api'
 import type { AlertEvent } from '../types/domain'
 
 export type AlertsSnapshotState =
@@ -10,95 +16,140 @@ export type AlertsSnapshotState =
   | { status: 'error' }
   | { status: 'loaded'; items: AlertEvent[] }
 
-/**
- * `'active'` upserts/removes by id (device-status derivation, no cap);
- * `'recent'` upserts in place / inserts new ids at the front, capped at
- * `limit` (a lifecycle table, e.g. the Alerts page).
- */
 export type AlertsSnapshotKind = 'active' | 'recent'
 
+const MAX_RETAINED_ALERT_IDS = 1000
+
+interface LoadedState {
+  scope: string
+  status: 'loaded'
+  store: AlertStore
+}
+
+type InternalState = { scope: string; status: 'loading' | 'error' } | LoadedState
+
+interface ScopeSync {
+  watermark: number | null
+  journal: AlertEvent[]
+  requestInFlight: boolean
+  retainedIds: Set<string>
+  compactionRequested: boolean
+}
+
 /**
- * Fetches an authoritative alerts snapshot from `path` and keeps it live via
- * the #74 WebSocket buffer (issue #75/#76 architecture): a transition that
- * arrives while the snapshot fetch is in flight is buffered and replayed on
- * top of it once it resolves (never lost, never applied out of order), and a
- * reconnect (#74 clears its live buffer on every disconnect) triggers exactly
- * one authoritative refetch. Shared by OverviewPage (`'active'`) and
- * AlertsPage (`'recent'`) so this race-sensitive logic exists exactly once.
+ * Owns all REST/live synchronization for one alert scope. The journal belongs
+ * to the scope, not a request; only an accepted snapshot consumes entries at
+ * or below its atomic watermark. Resolved events remain as hidden tombstones
+ * in active stores so stale firing frames cannot resurrect them.
  */
 export function useAlertsSnapshot(
   path: string,
   kind: AlertsSnapshotKind,
   limit = 20,
+  deviceId?: string,
+  refreshToken = 0,
 ): AlertsSnapshotState {
-  const [state, setState] = useState<AlertsSnapshotState>({ status: 'loading' })
+  const scope = `${kind}:${limit}:${deviceId ?? '*'}:${path}`
+  const [state, setState] = useState<InternalState>({ scope, status: 'loading' })
+  const [compactionToken, setCompactionToken] = useState(0)
   const resyncToken = useReconnectResync()
-  const bufferRef = useRef<AlertEvent[]>([])
-  const inFlightRef = useRef(true)
+  const generationRef = useRef(0)
+  const syncByScopeRef = useRef(new Map<string, ScopeSync>())
 
   useEffect(() => {
-    let current = true
-    bufferRef.current = []
-    inFlightRef.current = true
-
-    fetchJson<AlertEvent[]>(path)
-      .then((items) => {
-        if (!current) {
+    const generation = ++generationRef.current
+    const controller = new AbortController()
+    let sync = syncByScopeRef.current.get(scope)
+    if (!sync) {
+      sync = {
+        watermark: null,
+        journal: [],
+        requestInFlight: true,
+        retainedIds: new Set(),
+        compactionRequested: false,
+      }
+      syncByScopeRef.current.set(scope, sync)
+    } else {
+      sync.requestInFlight = true
+    }
+    fetchAlertsSnapshot(path, controller.signal)
+      .then(({ items, watermark }) => {
+        if (generation !== generationRef.current || controller.signal.aborted) return
+        const currentSync = syncByScopeRef.current.get(scope)
+        if (!currentSync) return
+        if (currentSync.watermark !== null && watermark < currentSync.watermark) {
+          currentSync.requestInFlight = false
+          currentSync.compactionRequested = false
           return
         }
-        const replayed =
-          kind === 'active'
-            ? replayActiveAlerts(items, bufferRef.current)
-            : replayRecentAlerts(items, bufferRef.current, limit)
-        bufferRef.current = []
-        inFlightRef.current = false
-        setState({ status: 'loaded', items: replayed })
+
+        const store = replayAlerts(items, currentSync.journal, watermark)
+        currentSync.watermark = watermark
+        currentSync.requestInFlight = false
+        // Only transitions covered by this authoritative snapshot are
+        // consumed. Newer replayed entries remain available until a later
+        // watermark covers them; stale/failed requests never reach this point.
+        currentSync.journal = currentSync.journal.filter((event) => event.sequence > watermark)
+        currentSync.retainedIds = new Set(store.order)
+        currentSync.compactionRequested = false
+        setState({ scope, status: 'loaded', store })
       })
       .catch(() => {
-        if (!current) {
-          return
+        if (generation !== generationRef.current || controller.signal.aborted) return
+        const currentSync = syncByScopeRef.current.get(scope)
+        if (currentSync) {
+          currentSync.requestInFlight = false
+          currentSync.compactionRequested = false
         }
-        // Snapshot-and-clear happens here, not inside the setState updater --
-        // a setState updater must be pure (React may invoke it more than
-        // once, e.g. under StrictMode), so reading/clearing a ref from
-        // inside it would make the first invocation's clear invisible to the
-        // second, silently dropping the buffered transitions (issue #75 B1).
-        const buffered = bufferRef.current
-        bufferRef.current = []
-        inFlightRef.current = false
-        setState((prev) => {
-          if (prev.status !== 'loaded') {
-            return { status: 'error' }
-          }
-          const items =
-            kind === 'active'
-              ? replayActiveAlerts(prev.items, buffered)
-              : replayRecentAlerts(prev.items, buffered, limit)
-          return { status: 'loaded', items }
-        })
+        setState((prev) =>
+          prev.scope === scope && prev.status === 'loaded' ? prev : { scope, status: 'error' },
+        )
       })
 
     return () => {
-      current = false
+      controller.abort()
     }
-    // resyncToken: after a reconnect, #74 clears its live alert buffer (a
-    // transition may have been missed while down) -- re-fetch the
-    // authoritative snapshot.
-  }, [path, kind, limit, resyncToken])
+  }, [path, scope, resyncToken, refreshToken, compactionToken])
 
   useLiveAlertTransitions((alert) => {
-    if (inFlightRef.current) {
-      bufferRef.current.push(alert)
-      return
-    }
-    setState((prev) => {
-      if (prev.status !== 'loaded') {
-        return prev
+    if (deviceId && alert.deviceId !== deviceId) return
+    let sync = syncByScopeRef.current.get(scope)
+    if (!sync) {
+      sync = {
+        watermark: null,
+        journal: [],
+        requestInFlight: false,
+        retainedIds: new Set(),
+        compactionRequested: false,
       }
-      const items = kind === 'active' ? mergeActiveAlert(prev.items, alert) : mergeRecentAlert(prev.items, alert, limit)
-      return { status: 'loaded', items }
-    })
+      syncByScopeRef.current.set(scope, sync)
+    }
+    if (sync.watermark !== null && alert.sequence <= sync.watermark) return
+    if (sync.requestInFlight || sync.watermark === null) sync.journal.push(alert)
+    sync.retainedIds.add(alert.id)
+    if (
+      sync.retainedIds.size > MAX_RETAINED_ALERT_IDS &&
+      !sync.requestInFlight &&
+      !sync.compactionRequested &&
+      sync.watermark !== null
+    ) {
+      // Out-of-order protection requires retaining resolved tombstones until
+      // an authoritative watermark covers them. Compact with one event-driven
+      // resync instead of imposing a lossy local cap or polling.
+      sync.compactionRequested = true
+      setCompactionToken((token) => token + 1)
+    }
+    setState((prev) =>
+      prev.scope === scope && prev.status === 'loaded'
+        ? { ...prev, store: mergeAlert(prev.store, alert) }
+        : prev,
+    )
   })
 
-  return state
+  if (state.scope !== scope) return { status: 'loading' }
+  if (state.status !== 'loaded') return { status: state.status }
+  return {
+    status: 'loaded',
+    items: kind === 'active' ? selectActiveAlerts(state.store) : selectRecentAlerts(state.store, limit),
+  }
 }

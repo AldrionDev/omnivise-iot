@@ -2,133 +2,220 @@ package com.omnivise.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.time.Instant;
 import java.util.Date;
 import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
 import org.bson.Document;
 import org.bson.conversions.Bson;
+import org.bson.types.ObjectId;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
+import com.mongodb.TransactionOptions;
+import com.mongodb.ReadConcern;
+import com.mongodb.client.ClientSession;
 import com.mongodb.client.FindIterable;
+import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoCollection;
+import com.mongodb.client.TransactionBody;
+import com.mongodb.client.model.FindOneAndUpdateOptions;
+import com.mongodb.client.result.UpdateResult;
 import com.omnivise.model.AlertEvent;
 
-/**
- * Read access to {@code alert_events} for {@code GET /api/alerts} (issue #73).
- *
- * <p>MongoDB is mocked. These tests pin the filter document built for each
- * combination of the (already validated) {@code state}/{@code severity}/{@code
- * deviceId} filters, the newest-first sort, that the query {@code limit} is
- * applied, and that each document is mapped through {@code AlertEventMapper} in
- * the collection's order.
- */
 @SuppressWarnings("unchecked")
 class AlertServiceTest {
 
-    private final MongoCollection<Document> collection = mock(MongoCollection.class);
+    private final MongoClient client = mock(MongoClient.class);
+    private final ClientSession session = mock(ClientSession.class);
+    private final MongoCollection<Document> events = mock(MongoCollection.class);
+    private final MongoCollection<Document> sequences = mock(MongoCollection.class);
+    private final AtomicLong nextSequence = new AtomicLong();
+    private AlertService service;
 
-    private static AlertQuery query(String state, String severity, String deviceId, String limit) {
-        return assertInstanceOf(AlertQuery.Valid.class,
-                AlertQuery.parse(state, severity, deviceId, limit)).query();
-    }
-
-    private void stubFind(List<Document> docs) {
-        FindIterable<Document> iterable = mock(FindIterable.class);
-        when(iterable.sort(any(Bson.class))).thenReturn(iterable);
-        when(iterable.limit(anyInt())).thenReturn(iterable);
-        doAnswer(inv -> {
-            Consumer<Document> consumer = inv.getArgument(0);
-            docs.forEach(consumer);
-            return null;
-        }).when(iterable).forEach(any(Consumer.class));
-        when(collection.find(any(Bson.class))).thenReturn(iterable);
-    }
-
-    private static Document eventDoc(String id, String state, String severity, String deviceId) {
-        return new Document("_id", new org.bson.types.ObjectId(id))
-                .append("ruleId", "rule-" + deviceId)
-                .append("deviceId", deviceId)
-                .append("channel", "input_voltage")
-                .append("severity", severity)
-                .append("state", state)
-                .append("triggeredValue", 2.0)
-                .append("lastValue", 2.0)
-                .append("startedAt", Date.from(Instant.parse("2026-09-10T08:00:00Z")));
-    }
-
-    // ------------------------------------------------------------------
-    // Filter construction
-    // ------------------------------------------------------------------
-
-    @Test
-    void noFiltersProduceAnEmptyQuery() {
-        assertEquals(new Document(), AlertService.buildFilter(null, null, null));
+    @BeforeEach
+    void setUp() {
+        when(client.startSession()).thenReturn(session);
+        when(session.withTransaction(any(TransactionBody.class), any(TransactionOptions.class)))
+                .thenAnswer(inv -> ((TransactionBody<?>) inv.getArgument(0)).execute());
+        when(sequences.findOneAndUpdate(any(ClientSession.class), any(Bson.class), any(Bson.class),
+                any(FindOneAndUpdateOptions.class)))
+                .thenAnswer(inv -> new Document("_id", "global")
+                        .append("value", nextSequence.incrementAndGet()));
+        service = new AlertService(client, events, sequences);
     }
 
     @Test
-    void eachFilterIsAppliedOnItsOwnField() {
-        assertEquals(new Document("state", "firing"),
-                AlertService.buildFilter("firing", null, null));
-        assertEquals(new Document("severity", "critical"),
-                AlertService.buildFilter(null, "critical", null));
-        assertEquals(new Document("deviceId", "ups-1"),
-                AlertService.buildFilter(null, null, "ups-1"));
+    void transitionSequenceIsAllocatedAndPersistedInTheSameSession() {
+        AlertEvent firing = service.insertFiring(pending());
+        when(events.updateOne(any(ClientSession.class), any(Bson.class), any(Bson.class)))
+                .thenReturn(UpdateResult.acknowledged(1, 1L, null));
+
+        AlertEvent resolved = service.resolve(firing, 231.0, "2026-09-10T08:01:00Z").orElseThrow();
+
+        assertEquals(1L, firing.sequence());
+        assertEquals(2L, resolved.sequence());
+        ArgumentCaptor<Document> inserted = ArgumentCaptor.forClass(Document.class);
+        verify(events).insertOne(org.mockito.ArgumentMatchers.same(session), inserted.capture());
+        assertEquals(1L, inserted.getValue().getLong("sequence"));
+
+        ArgumentCaptor<Bson> update = ArgumentCaptor.forClass(Bson.class);
+        verify(events).updateOne(org.mockito.ArgumentMatchers.same(session), any(Bson.class), update.capture());
+        assertTrue(update.getValue().toBsonDocument().toJson().contains("\"sequence\": 2"));
+        verify(sequences, times(2)).findOneAndUpdate(
+                org.mockito.ArgumentMatchers.same(session), any(Bson.class), any(Bson.class),
+                any(FindOneAndUpdateOptions.class));
     }
 
     @Test
-    void allThreeFiltersAreCombined() {
-        assertEquals(
-                new Document("state", "resolved").append("severity", "warning").append("deviceId", "rack-a1"),
+    void insertFailureEscapesTheTransactionAndCannotReturnAPersistedEvent() {
+        org.mockito.Mockito.doThrow(new IllegalStateException("insert failed"))
+                .when(events).insertOne(any(ClientSession.class), any(Document.class));
+
+        assertThrows(IllegalStateException.class, () -> service.insertFiring(pending()));
+        verify(sequences).findOneAndUpdate(org.mockito.ArgumentMatchers.same(session),
+                any(Bson.class), any(Bson.class), any(FindOneAndUpdateOptions.class));
+    }
+
+    @Test
+    void resolveUsesIdStateAndSequenceCasAndReturnsEmptyOnMiss() {
+        when(events.updateOne(any(ClientSession.class), any(Bson.class), any(Bson.class)))
+                .thenReturn(UpdateResult.acknowledged(0, 0L, null));
+        AlertEvent current = firing(7L);
+
+        Optional<AlertEvent> result = service.resolve(current, 231.0, "2026-09-10T08:01:00Z");
+
+        assertTrue(result.isEmpty());
+        ArgumentCaptor<Bson> filter = ArgumentCaptor.forClass(Bson.class);
+        verify(events).updateOne(org.mockito.ArgumentMatchers.same(session), filter.capture(), any(Bson.class));
+        String filterJson = filter.getValue().toBsonDocument().toJson();
+        assertTrue(filterJson.contains(current.id()));
+        assertTrue(filterJson.contains("firing"));
+        assertTrue(filterJson.contains("\"sequence\": 7"));
+    }
+
+    @Test
+    void legacySequenceZeroCasAlsoMatchesAMissingSequenceField() {
+        when(events.updateOne(any(ClientSession.class), any(Bson.class), any(Bson.class)))
+                .thenReturn(UpdateResult.acknowledged(0, 0L, null));
+
+        service.resolve(firing(0L), 231.0, "2026-09-10T08:01:00Z");
+
+        ArgumentCaptor<Bson> filter = ArgumentCaptor.forClass(Bson.class);
+        verify(events).updateOne(any(ClientSession.class), filter.capture(), any(Bson.class));
+        String json = filter.getValue().toBsonDocument().toJson();
+        assertTrue(json.contains("$exists"));
+        assertTrue(json.contains("false"));
+    }
+
+    @Test
+    void repeatedValueUpdateDoesNotAllocateASequence() {
+        when(events.updateOne(any(Bson.class), any(Bson.class)))
+                .thenReturn(UpdateResult.acknowledged(1, 1L, null));
+
+        assertTrue(service.updateLastValue(firing(4L), 1.5));
+
+        verify(events).updateOne(any(Bson.class), any(Bson.class));
+        verify(sequences, times(0)).findOneAndUpdate(any(ClientSession.class), any(Bson.class),
+                any(Bson.class), any(FindOneAndUpdateOptions.class));
+    }
+
+    @Test
+    void snapshotReadsItemsAndWatermarkThroughTheSameSessionAndKeepsArrayPayload() {
+        FindIterable<Document> eventFind = iterable(List.of(eventDoc(11L)));
+        FindIterable<Document> sequenceFind = iterable(List.of(new Document("_id", "global").append("value", 15L)));
+        when(events.find(any(ClientSession.class), any(Bson.class))).thenReturn(eventFind);
+        when(sequences.find(any(ClientSession.class), any(Bson.class))).thenReturn(sequenceFind);
+        AlertQuery query = assertInstanceOf(AlertQuery.Valid.class,
+                AlertQuery.parse("firing", null, null, "25")).query();
+
+        AlertService.Snapshot snapshot = service.findSnapshot(query);
+
+        assertEquals(15L, snapshot.watermark());
+        assertEquals(List.of(11L), snapshot.events().stream().map(AlertEvent::sequence).toList());
+        ArgumentCaptor<TransactionOptions> transactionOptions = ArgumentCaptor.forClass(TransactionOptions.class);
+        verify(session).withTransaction(any(TransactionBody.class), transactionOptions.capture());
+        assertEquals(ReadConcern.SNAPSHOT, transactionOptions.getValue().getReadConcern());
+        InOrder order = inOrder(events, sequences);
+        order.verify(events).find(org.mockito.ArgumentMatchers.same(session), any(Bson.class));
+        order.verify(sequences).find(org.mockito.ArgumentMatchers.same(session), any(Bson.class));
+        verify(eventFind).sort(AlertService.SORT_NEWEST_FIRST);
+        verify(eventFind).limit(25);
+    }
+
+    @Test
+    void snapshotWithoutACounterHasDecimalZeroWatermark() {
+        FindIterable<Document> emptyEvents = iterable(List.of());
+        FindIterable<Document> emptySequences = iterable(List.of());
+        when(events.find(any(ClientSession.class), any(Bson.class))).thenReturn(emptyEvents);
+        when(sequences.find(any(ClientSession.class), any(Bson.class))).thenReturn(emptySequences);
+        AlertQuery query = assertInstanceOf(AlertQuery.Valid.class,
+                AlertQuery.parse(null, null, null, null)).query();
+
+        AlertService.Snapshot snapshot = service.findSnapshot(query);
+
+        assertEquals(0L, snapshot.watermark());
+        assertEquals("0", Long.toString(snapshot.watermark()));
+        assertEquals(List.of(), snapshot.events());
+    }
+
+    @Test
+    void allQueryFiltersAreCombined() {
+        assertEquals(new Document("state", "resolved").append("severity", "warning")
+                        .append("deviceId", "rack-a1"),
                 AlertService.buildFilter("resolved", "warning", "rack-a1"));
     }
 
-    @Test
-    void newestFirstSortIsByStartedAtDescendingWithAStableIdTieBreaker() {
-        assertEquals(-1, AlertService.SORT_NEWEST_FIRST.getInteger("startedAt"));
-        assertEquals(-1, AlertService.SORT_NEWEST_FIRST.getInteger("_id"));
+    private <T> FindIterable<T> iterable(List<T> values) {
+        FindIterable<T> iterable = mock(FindIterable.class);
+        when(iterable.sort(any(Bson.class))).thenReturn(iterable);
+        when(iterable.limit(anyInt())).thenReturn(iterable);
+        when(iterable.first()).thenReturn(values.isEmpty() ? null : values.getFirst());
+        doAnswer(inv -> {
+            Consumer<T> consumer = inv.getArgument(0);
+            values.forEach(consumer);
+            return null;
+        }).when(iterable).forEach(any(Consumer.class));
+        return iterable;
     }
 
-    // ------------------------------------------------------------------
-    // Query execution
-    // ------------------------------------------------------------------
-
-    @Test
-    void findAppliesTheValidatedFilterSortAndLimitAndMapsEachDocument() {
-        stubFind(List.of(
-                eventDoc("64b7f000000000000000ff01", "firing", "critical", "ups-1"),
-                eventDoc("64b7f000000000000000ff02", "firing", "critical", "ups-1")));
-
-        List<AlertEvent> result = new AlertService(collection).find(query("firing", "critical", "ups-1", "25"));
-
-        ArgumentCaptor<Bson> filter = ArgumentCaptor.forClass(Bson.class);
-        verify(collection).find(filter.capture());
-        assertEquals(
-                new Document("state", "firing").append("severity", "critical").append("deviceId", "ups-1"),
-                filter.getValue());
-
-        FindIterable<Document> iterable = collection.find(filter.getValue());
-        verify(iterable).sort(AlertService.SORT_NEWEST_FIRST);
-        verify(iterable).limit(25);
-
-        assertEquals(2, result.size());
-        assertEquals("64b7f000000000000000ff01", result.get(0).id());
-        assertEquals("firing", result.get(0).state());
-        assertEquals("ups-1", result.get(1).deviceId());
+    private static AlertEvent pending() {
+        return new AlertEvent(null, 0L, "ups-input-voltage-low", "ups-1", "input_voltage",
+                "critical", "firing", 2.1, 2.1, "2026-09-10T08:00:00Z", null);
     }
 
-    @Test
-    void findReturnsAnEmptyListWhenNothingMatches() {
-        stubFind(List.of());
-        assertEquals(List.of(), new AlertService(collection).find(query(null, null, null, null)));
+    private static AlertEvent firing(long sequence) {
+        return new AlertEvent("64b7f0000000000000000001", sequence, "ups-input-voltage-low",
+                "ups-1", "input_voltage", "critical", "firing", 2.1, 2.1,
+                "2026-09-10T08:00:00Z", null);
+    }
+
+    private static Document eventDoc(long sequence) {
+        return new Document("_id", new ObjectId("64b7f0000000000000000001"))
+                .append("sequence", sequence)
+                .append("ruleId", "ups-input-voltage-low")
+                .append("deviceId", "ups-1")
+                .append("channel", "input_voltage")
+                .append("severity", "critical")
+                .append("state", "firing")
+                .append("triggeredValue", 2.1)
+                .append("lastValue", 2.1)
+                .append("startedAt", Date.from(Instant.parse("2026-09-10T08:00:00Z")));
     }
 }

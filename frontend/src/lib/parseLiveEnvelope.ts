@@ -25,11 +25,14 @@ function isReadingPayload(value: unknown): value is Reading {
   )
 }
 
-function isAlertPayload(value: unknown): value is AlertEvent {
+export function isAlertEvent(value: unknown): value is AlertEvent {
   if (!isRecord(value)) {
     return false
   }
   return (
+    typeof value.sequence === 'number' &&
+    Number.isSafeInteger(value.sequence) &&
+    value.sequence >= 0 &&
     isString(value.id) &&
     isString(value.ruleId) &&
     isString(value.deviceId) &&
@@ -65,7 +68,7 @@ export function parseLiveEnvelope(raw: string): LiveEnvelope | null {
     return { kind: 'reading', payload: parsed.payload }
   }
 
-  if (parsed.kind === 'alert' && isAlertPayload(parsed.payload)) {
+  if (parsed.kind === 'alert' && isAlertEvent(parsed.payload)) {
     return { kind: 'alert', payload: parsed.payload }
   }
 

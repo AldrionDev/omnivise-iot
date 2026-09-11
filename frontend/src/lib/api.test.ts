@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, fetchJson } from './api'
+import { ApiError, fetchAlertsSnapshot, fetchJson } from './api'
 
 beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn())
@@ -54,6 +54,52 @@ describe('fetchJson', () => {
 
     await expect(fetchJson('/api/devices', { signal: new AbortController().signal })).rejects.toBe(
       abortError,
+    )
+  })
+})
+
+describe('fetchAlertsSnapshot', () => {
+  const alert = {
+    sequence: 7,
+    id: 'a1',
+    ruleId: 'r1',
+    deviceId: 'rack-a1',
+    channel: 'intake_temp',
+    severity: 'warning',
+    state: 'firing',
+    triggeredValue: 31,
+    lastValue: 31,
+    startedAt: '2026-09-11T08:00:00Z',
+    resolvedAt: null,
+  }
+
+  it('returns the validated array and atomic watermark', async () => {
+    vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify([alert]), {
+      status: 200,
+      headers: { 'X-Alert-Watermark': '7' },
+    }))
+
+    await expect(fetchAlertsSnapshot('/alerts', new AbortController().signal)).resolves.toEqual({
+      items: [alert],
+      watermark: 7,
+    })
+  })
+
+  it.each([
+    { header: null, body: [alert] },
+    { header: '', body: [] },
+    { header: '1.0', body: [] },
+    { header: '-1', body: [alert] },
+    { header: '6', body: [alert] },
+    { header: '7', body: [{ ...alert, sequence: 1.5 }] },
+  ])('fails closed for an invalid alert snapshot contract', async ({ header, body }) => {
+    vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify(body), {
+      status: 200,
+      headers: header === null ? undefined : { 'X-Alert-Watermark': header },
+    }))
+
+    await expect(fetchAlertsSnapshot('/alerts', new AbortController().signal)).rejects.toThrow(
+      'Invalid alert snapshot response',
     )
   })
 })

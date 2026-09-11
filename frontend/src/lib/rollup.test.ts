@@ -15,6 +15,7 @@ function device(overrides: Partial<Device>): Device {
 
 function alert(overrides: Partial<AlertEvent>): AlertEvent {
   return {
+    sequence: overrides.state === 'resolved' ? 2 : 1,
     id: 'a1',
     ruleId: 'r1',
     deviceId: 'rack-a1',

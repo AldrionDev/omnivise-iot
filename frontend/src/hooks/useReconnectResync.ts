@@ -7,9 +7,8 @@ const RECOVERABLE_STATES: ConnectionState[] = ['reconnecting', 'disconnected']
 /**
  * A token that increments exactly when the #74 WebSocket transitions from a
  * disconnected/reconnecting period back to connected -- never on the initial
- * connect, and never on an ordinary render. #74 clears its live alert buffer
- * on every disconnect because transitions may have been missed while down;
- * consumers add this token to a REST-fetch effect's dependency array to
+ * connect, and never on an ordinary render. Transitions may have been missed
+ * while disconnected, so consumers add this token to a REST-fetch effect to
  * trigger exactly one authoritative refetch after such a recovery.
  *
  * Adjusts state during render (React's documented pattern for deriving state

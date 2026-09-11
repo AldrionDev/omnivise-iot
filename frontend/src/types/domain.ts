@@ -41,6 +41,7 @@ export type AlertState = 'firing' | 'resolved'
  * internal pre-insert model).
  */
 export interface AlertEvent {
+  sequence: number
   id: string
   ruleId: string
   deviceId: string

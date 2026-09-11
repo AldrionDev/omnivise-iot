@@ -37,12 +37,12 @@ class AlertWebhookTest {
     private final ObjectMapper mapper = new ObjectMapper();
 
     private static AlertEvent firing() {
-        return new AlertEvent("64b7f0000000000000000001", "ups-input-voltage-low", "ups-1",
+        return new AlertEvent("64b7f0000000000000000001", 17L, "ups-input-voltage-low", "ups-1",
                 "input_voltage", "critical", "firing", 2.1, 1.8, "2026-09-10T08:03:15Z", null);
     }
 
     private static AlertEvent resolved() {
-        return new AlertEvent("64b7f0000000000000000001", "ups-input-voltage-low", "ups-1",
+        return new AlertEvent("64b7f0000000000000000001", 18L, "ups-input-voltage-low", "ups-1",
                 "input_voltage", "critical", "resolved", 2.1, 231.4,
                 "2026-09-10T08:03:15Z", "2026-09-10T08:06:40Z");
     }

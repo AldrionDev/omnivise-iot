@@ -21,7 +21,7 @@ class AlertMessageTest {
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     private static AlertEvent firing() {
-        return new AlertEvent("64b7f0000000000000000001", "ups-input-voltage-low", "ups-1",
+        return new AlertEvent("64b7f0000000000000000001", 17L, "ups-input-voltage-low", "ups-1",
                 "input_voltage", "critical", "firing", 2.1, 1.8, "2026-09-10T08:03:15Z", null);
     }
 
@@ -33,6 +33,8 @@ class AlertMessageTest {
         assertEquals("alert", json.get("kind").asText());
         JsonNode payload = json.get("payload");
         assertEquals("64b7f0000000000000000001", payload.get("id").asText());
+        assertTrue(payload.get("sequence").isIntegralNumber());
+        assertEquals(17L, payload.get("sequence").asLong());
         assertEquals("ups-input-voltage-low", payload.get("ruleId").asText());
         assertEquals("ups-1", payload.get("deviceId").asText());
         assertEquals("input_voltage", payload.get("channel").asText());
@@ -51,7 +53,7 @@ class AlertMessageTest {
 
     @Test
     void aResolvedEventCarriesResolvedAt() throws Exception {
-        AlertEvent resolved = new AlertEvent("64b7f0000000000000000001", "ups-input-voltage-low",
+        AlertEvent resolved = new AlertEvent("64b7f0000000000000000001", 18L, "ups-input-voltage-low",
                 "ups-1", "input_voltage", "critical", "resolved", 2.1, 231.4,
                 "2026-09-10T08:03:15Z", "2026-09-10T08:06:40Z");
 

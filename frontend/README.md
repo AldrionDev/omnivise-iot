@@ -89,12 +89,10 @@ Behavior:
 - Reconnects on an unexpected close with deterministic exponential backoff:
   1s, 2s, 4s, 8s, capped at 10s. The delay resets to 1s after a successful
   reconnect. No jitter.
-- On any unexpected disconnect, both `latestReadings` and the live `alerts`
-  buffer are cleared and `connectionState` moves to `"reconnecting"` -- a
-  dropped connection can mean missed transitions, so nothing from the old
-  connection is kept as if it were still current. This buffer is a live
-  foundation only, not historical/authoritative alert state (that is a REST
-  concern for a later issue).
+- On any unexpected disconnect, `latestReadings` is cleared and
+  `connectionState` moves to `"reconnecting"`. Alert frames are delivered
+  directly through a stable subscription owned by this single socket; they are
+  never transported through a bounded React array.
 - Cleans up on unmount: cancels any pending reconnect timer and closes the
   socket without scheduling a further reconnect.
 
@@ -103,23 +101,20 @@ The connection state (`connecting` / `connected` / `reconnecting` /
 
 ### Authoritative alert state (`useAlertsSnapshot`)
 
-The live `alerts` buffer above is not authoritative -- it is cleared on every
-disconnect. Every alert-consuming view (Devices/Device-detail from #75,
-Overview/Alerts from #76) is instead backed by a REST snapshot
-(`GET /api/alerts/active` or `GET /api/alerts`) kept live via the WebSocket
-buffer and re-synchronized after a reconnect. `src/hooks/useAlertsSnapshot.ts`
-is #76's extraction of that pattern -- first established inline in #75's
-`DevicesPage`/`DeviceDetailPage` -- into one reusable hook, parameterized by
-`kind` (`'active'` upserts/removes by id with no cap, for device-status
-derivation; `'recent'` upserts in place / inserts new ids at the front,
-capped at a limit, for a lifecycle table): a transition arriving while the
-snapshot fetch is in flight is buffered and replayed on top of it once it
-resolves, so a race between a live transition and a pending/failing REST
-fetch never loses or reorders it (see `src/lib/alertMerge.ts` and the hook's
-tests). `DevicesPage` and `DeviceDetailPage` still carry their own original
-#75 inline copies of this pattern rather than the hook -- #76 was scoped to
-leave both pages unmodified -- so `useAlertsSnapshot` is not yet the single
-implementation across every alert-consuming view.
+Every alert-consuming view is backed by `useAlertsSnapshot`, which combines an
+authoritative REST snapshot with direct WebSocket transitions. Each persisted
+firing/resolved transition has a global `sequence`; each alert REST response
+has an `X-Alert-Watermark` read from the same MongoDB snapshot as its array
+body. The hook installs the snapshot and replays only journal entries newer
+than that watermark. Merge is monotonic per `alert.id`, while resolved records
+remain hidden tombstones for active views.
+
+The pending journal belongs to the alert query scope rather than an individual
+request. Reconnects start an abortable, generation-guarded REST resync without
+clearing that journal, so overlapping, stale, lower-watermark, and failed
+requests cannot consume newer synchronization state. Loaded state continues to
+receive pure functional updates during a resync; a successful REST result is
+authoritative and a failed resync preserves the live-patched state.
 
 ## Runtime reverse proxy (backend upstream)
 

@@ -25,6 +25,7 @@ const UPS_1: Device = {
 
 function alert(overrides: Partial<AlertEvent>): AlertEvent {
   return {
+    sequence: overrides.state === 'resolved' ? 3 : overrides.severity === 'critical' ? 2 : 1,
     id: 'a1',
     ruleId: 'r1',
     deviceId: 'rack-a1',
@@ -39,13 +40,18 @@ function alert(overrides: Partial<AlertEvent>): AlertEvent {
   }
 }
 
+function alertResponse(items: AlertEvent[]) {
+  const watermark = Math.max(0, ...items.map((item) => item.sequence))
+  return new Response(JSON.stringify(items), { status: 200, headers: { 'X-Alert-Watermark': String(watermark) } })
+}
+
 function mockFetchJson(devices: Device[], activeAlerts: AlertEvent[]) {
   vi.stubGlobal(
     'fetch',
     vi.fn((input: string | URL) => {
       const url = String(input)
       if (url.includes('/alerts/active')) {
-        return Promise.resolve(new Response(JSON.stringify(activeAlerts), { status: 200 }))
+        return Promise.resolve(alertResponse(activeAlerts))
       }
       if (url.includes('/devices')) {
         return Promise.resolve(new Response(JSON.stringify(devices), { status: 200 }))
@@ -354,7 +360,7 @@ describe('DevicesPage snapshot-vs-live-alert race (issue #75 M1)', () => {
 
     return {
       resolveActive: (items: AlertEvent[]) =>
-        resolveActive?.(new Response(JSON.stringify(items), { status: 200 })),
+        resolveActive?.(alertResponse(items)),
     }
   }
 
@@ -426,7 +432,7 @@ describe('DevicesPage resync failure preserves buffered alerts (issue #75 B1)', 
         const url = String(input)
         if (url.includes('/alerts/active')) {
           if (!resyncArmed) {
-            return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }))
+            return Promise.resolve(alertResponse([]))
           }
           resyncRequestCount += 1
           return new Promise<Response>((_resolve, reject) => {
