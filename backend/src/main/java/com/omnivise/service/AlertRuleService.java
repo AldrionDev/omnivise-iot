@@ -69,6 +69,22 @@ public class AlertRuleService {
     }
 
     /**
+     * The enabled rules applicable to one device, in seed order (issue #89:
+     * {@code GET /api/alerts/rules?deviceId=}).
+     *
+     * <p>Applicability is channel-independent — the caller resolves {@code
+     * deviceKind} from {@code DeviceService} once and passes it in here.
+     *
+     * @param deviceId   the device's id
+     * @param deviceKind the device's kind, as resolved from the device registry
+     */
+    public List<AlertRule> getRulesForDevice(String deviceId, String deviceKind) {
+        return rules.stream()
+                .filter(rule -> rule.matchesDevice(deviceId, deviceKind))
+                .toList();
+    }
+
+    /**
      * Maps an {@code alert_rules} document to an {@link AlertRule}. Numbers are
      * read leniently ({@code int} or {@code double} both seed fine).
      */
