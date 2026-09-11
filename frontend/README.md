@@ -1,9 +1,10 @@
 # OmniVise IoT -- Frontend
 
-React 19 + TypeScript dashboard, built with Vite and served by Nginx. This is the
-frontend foundation from issue #74: routing, a dark-first design-token layer, a
-handful of headless UI primitives, and a resilient typed WebSocket client. It has
-no feature views yet -- Overview/Devices/Alerts are placeholders until #75/#76.
+React 19 + TypeScript dashboard, built with Vite and served by Nginx. Issue #74
+laid the foundation (routing, a dark-first design-token layer, a handful of
+headless UI primitives, and a resilient typed WebSocket client); #75 added the
+Devices/Device-detail views; #76 added the Overview landing page and the
+Alerts view.
 
 ## Stack
 
@@ -11,7 +12,7 @@ no feature views yet -- Overview/Devices/Alerts are placeholders until #75/#76.
 - `react-router` for client-side routing
 - Tailwind CSS v4 (CSS-first config, tokens wired into `@theme`)
 - Vitest + Testing Library
-- `recharts` is installed but unused until #75
+- `recharts` for `TimeSeriesChart` (#75) and the compact `Sparkline` (#76)
 
 ## Local development
 
@@ -30,14 +31,30 @@ loaders/actions). All routes render inside `AppShell` via `<Outlet/>`:
 
 | Route | Renders |
 | --- | --- |
-| `/` | Overview placeholder |
-| `/devices` | Devices placeholder |
-| `/devices/:deviceId` | Device detail placeholder |
-| `/alerts` | Alerts placeholder |
+| `/` | Overview: status roll-up, headline metrics, active alerts, device grid |
+| `/devices` | Device registry, filterable by kind/location/status |
+| `/devices/:deviceId` | Device detail: channel history, alert rules, recent alerts |
+| `/alerts` | Alert history, filterable by state/severity/device |
 | anything else | Not-found placeholder |
 
 Nginx already serves the SPA with `try_files ... /index.html` (see `nginx.conf`),
 so client-side routes need no server change.
+
+## Device status (Overview / Devices)
+
+`device_status` is **not** a backend concept -- there is no
+`GET /api/devices/:id/status` endpoint, and #76 deliberately did not add one.
+It is computed client-side, once, in `src/lib/deviceStatus.ts`
+(`deriveDeviceStatus`): a device is `critical` if it has an active critical
+alert, `warning`/`degraded` if it has an active warning alert, else `ok`. The
+inputs are exactly `GET /api/devices` (the registry) and
+`GET /api/alerts/active` (state=firing alerts) -- both already-public REST
+contracts.
+
+The Overview roll-up tiles use the issue-specified wording `ok` / `degraded` /
+`critical` (see `src/lib/rollup.ts`); the Devices/Device-detail pages (#75)
+use `ok` / `warning` / `critical`. Both wordings are presentation labels over
+the same `deriveDeviceStatus` call -- the derivation itself is not duplicated.
 
 ## Theming
 
@@ -83,6 +100,26 @@ Behavior:
 
 The connection state (`connecting` / `connected` / `reconnecting` /
 `disconnected`) is shown in `AppShell`'s top bar.
+
+### Authoritative alert state (`useAlertsSnapshot`)
+
+The live `alerts` buffer above is not authoritative -- it is cleared on every
+disconnect. Every alert-consuming view (Devices/Device-detail from #75,
+Overview/Alerts from #76) is instead backed by a REST snapshot
+(`GET /api/alerts/active` or `GET /api/alerts`) kept live via the WebSocket
+buffer and re-synchronized after a reconnect. `src/hooks/useAlertsSnapshot.ts`
+is #76's extraction of that pattern -- first established inline in #75's
+`DevicesPage`/`DeviceDetailPage` -- into one reusable hook, parameterized by
+`kind` (`'active'` upserts/removes by id with no cap, for device-status
+derivation; `'recent'` upserts in place / inserts new ids at the front,
+capped at a limit, for a lifecycle table): a transition arriving while the
+snapshot fetch is in flight is buffered and replayed on top of it once it
+resolves, so a race between a live transition and a pending/failing REST
+fetch never loses or reorders it (see `src/lib/alertMerge.ts` and the hook's
+tests). `DevicesPage` and `DeviceDetailPage` still carry their own original
+#75 inline copies of this pattern rather than the hook -- #76 was scoped to
+leave both pages unmodified -- so `useAlertsSnapshot` is not yet the single
+implementation across every alert-consuming view.
 
 ## Runtime reverse proxy (backend upstream)
 
