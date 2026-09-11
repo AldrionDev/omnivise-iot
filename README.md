@@ -14,9 +14,30 @@ implements production-oriented delivery practices and documents their limits.
 
 ## What it demonstrates
 
+### Application features
+
+- **Seeded device registry**: Five predefined monitored devices (two server racks,
+  one UPS, one PDU, one CRAC unit) with device-specific channels and units.
+- **Device/channel-scoped readings**: All sensor readings are keyed by `deviceId`
+  and `channel`, with support for both numeric and string values (e.g., temperature
+  in °C or door contact state "open"/"closed").
+- **Real-time live updates**: Over a single WebSocket (`/ws/sensors`) with no polling.
+  Typed message envelopes discriminate between reading and alert events.
+- **History API**: Down-sampled time-series queries with 1-minute, 5-minute, and 1-hour
+  buckets via MongoDB `$dateTrunc`. Max 1000 buckets per query; queries for invalid
+  date ranges fail with a structured 400 response.
+- **Threshold alerting**: Five seeded alerting rules with hysteresis (separate firing
+  and clear thresholds). Firing/resolved state transitions are persisted and broadcast
+  to clients. Optional outbound webhook for alert state changes.
+- **Read-only alert rules API**: Clients can inspect the full rule set or query rules
+  for a specific device; rule CRUD is not exposed.
+- **React/TypeScript monitoring console**: Multi-view dashboard with overview, per-device
+  detail charts, device list, and alerts view. Dark-first theme with persisted theme toggle.
+
+### DevOps and delivery
+
 - Full-stack real-time architecture: sensor simulator → MongoDB → Change Stream →
   backend → WebSocket → React UI.
-- Real-time updates pushed over a single WebSocket (`/ws/sensors`), no polling.
 - Javalin (Java 21) REST + WebSocket backend driven by MongoDB Change Streams.
 - React 19 / Vite dashboard served by Nginx from one environment-independent image
   definition — backend upstream and DNS resolver are substituted at container
@@ -196,6 +217,72 @@ cd frontend   && npm ci && npm run lint && npm test && npm run build
 docker compose config
 ```
 
+## REST API and WebSocket
+
+### WebSocket
+
+| Endpoint | Description |
+| --- | --- |
+| `WS /ws/sensors` | Subscribe to real-time reading and alert events (see below) |
+
+**Message envelope** — all messages are typed JSON with a `kind` discriminator:
+
+**Reading message:**
+```json
+{
+  "kind": "reading",
+  "payload": {
+    "deviceId": "rack-a1",
+    "channel": "intake_temp",
+    "value": 21.4,
+    "unit": "°C",
+    "timestamp": "2026-09-10T08:00:00Z"
+  }
+}
+```
+
+**Alert message:**
+```json
+{
+  "kind": "alert",
+  "payload": {
+    "id": "66f2a1b3c4d5e6f7a8b9c0d1",
+    "ruleId": "rack-intake-temp-high",
+    "deviceId": "rack-a1",
+    "channel": "intake_temp",
+    "severity": "warning",
+    "state": "firing",
+    "triggeredValue": 31.2,
+    "lastValue": 31.2,
+    "startedAt": "2026-09-10T08:15:00Z",
+    "resolvedAt": null
+  }
+}
+```
+
+### REST Endpoints
+
+| Method | Path | Query Parameters | Description |
+| --- | --- | --- | --- |
+| GET | `/` | - | API info (message + version) |
+| GET | `/health` | - | Health check |
+| GET | `/api/devices` | - | List all seeded devices with channels and units |
+| GET | `/api/devices/{deviceId}` | - | Get a single device by ID |
+| GET | `/api/sensors/latest` | `deviceId`, `channel`, `limit` (1–500, default 50) | Latest readings, newest first; optional device/channel filters |
+| GET | `/api/sensors/history` | **required:** `deviceId`, `channel`, `from`, `to`, `bucket`; bucket values: `1m`, `5m`, `1h` | Down-sampled time-series. `from`/`to` must be ISO-8601 timestamps. Max 1000 buckets per query. |
+| GET | `/api/alerts` | `state` (firing\|resolved), `severity` (warning\|critical), `deviceId`, `limit` (1–500, default 100) | All alert events matching the filters, newest first |
+| GET | `/api/alerts/active` | `severity`, `deviceId`, `limit` | Convenience endpoint for `state=firing`; state cannot be overridden |
+| GET | `/api/alerts/rules` | `deviceId` (optional; must be a known device if provided) | Seeded alert rules; without `deviceId`, returns all enabled rules; with `deviceId`, returns only rules applicable to that device. Unknown `deviceId` returns 400. |
+
+## Frontend Routes
+
+| Route | Description |
+| --- | --- |
+| `/` | Overview: dashboard with live readings and active alerts summary |
+| `/devices` | Device list with live status indicators |
+| `/devices/:deviceId` | Device detail: channel charts with history query, threshold rules |
+| `/alerts` | Alerts view: firing and resolved alert events |
+
 ## Repository layout
 
 ```
@@ -249,13 +336,34 @@ they are inert and safety rests on maintainer discipline. See
 **Implemented**
 
 - Full local runtime on Docker Compose.
+- Seeded device registry with device/channel-scoped readings.
+- History API with down-sampled time-series (1m/5m/1h buckets).
+- Threshold alerting with hysteresis and firing/resolved lifecycle.
+- Read-only alert rules API.
+- Multi-view React/TypeScript monitoring dashboard.
 - GitHub Actions pull-request CI.
-- Jenkins post-merge delivery to a k3s homelab target (`DEPLOY_TARGET=homelab`).
+- Jenkins post-merge delivery to k3s homelab target (`DEPLOY_TARGET=homelab`).
 
 **Future direction (not implemented)**
 
-- AWS / EKS deployment: `infra/aws/`, GHCR images, and `DEPLOY_TARGET=aws` / `both`.
-- Declared non-goals for that future work: no Amazon ECR, no GitHub-to-AWS OIDC.
+Application features:
+- Device CRUD operations (devices are currently seeded and read-only)
+- Alert-rule CRUD (rules are currently seeded and read-only)
+- Authentication and authorization
+- History explorer UI (drill-down, range selection, export)
+- Rack elevation / rack topology visualization
 
-This is architecture direction only. There is no GHCR, EKS, or AWS delivery in the
+Observability:
+- Prometheus metrics export
+- Grafana dashboards
+- OpenTelemetry instrumentation
+
+Data and persistence:
+- MongoDB time-series collections with TTL (currently using plain collections)
+
+Infrastructure:
+- AWS / EKS deployment target: `infra/aws/`, GHCR images, and `DEPLOY_TARGET=aws` / `both`
+- Declared non-goals for AWS work: no Amazon ECR, no GitHub-to-AWS OIDC
+
+This is architecture direction only. None of these future capabilities exist in the
 repository today.
