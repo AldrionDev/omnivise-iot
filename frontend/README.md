@@ -1,19 +1,88 @@
-# React + Vite
+# OmniVise IoT -- Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React 19 + TypeScript dashboard, built with Vite and served by Nginx. This is the
+frontend foundation from issue #74: routing, a dark-first design-token layer, a
+handful of headless UI primitives, and a resilient typed WebSocket client. It has
+no feature views yet -- Overview/Devices/Alerts are placeholders until #75/#76.
 
-Currently, two official plugins are available:
+## Stack
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+- React 19, TypeScript (strict), Vite 7
+- `react-router` for client-side routing
+- Tailwind CSS v4 (CSS-first config, tokens wired into `@theme`)
+- Vitest + Testing Library
+- `recharts` is installed but unused until #75
 
-## React Compiler
+## Local development
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+```
+npm ci
+npm run dev      # Vite dev server
+npm run lint
+npm test
+npm run build
+```
 
-## Expanding the ESLint configuration
+## Routing
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+`react-router` in plain declarative mode (`BrowserRouter`/`Routes`/`Route`, no
+loaders/actions). All routes render inside `AppShell` via `<Outlet/>`:
+
+| Route | Renders |
+| --- | --- |
+| `/` | Overview placeholder |
+| `/devices` | Devices placeholder |
+| `/devices/:deviceId` | Device detail placeholder |
+| `/alerts` | Alerts placeholder |
+| anything else | Not-found placeholder |
+
+Nginx already serves the SPA with `try_files ... /index.html` (see `nginx.conf`),
+so client-side routes need no server change.
+
+## Theming
+
+Dark is the unconditional default. `ThemeProvider` (`src/theme/ThemeProvider.tsx`)
+reads a persisted choice from `localStorage` (`omnivise-theme`); anything other
+than exactly `"light"` falls back to dark. Toggling writes
+`document.documentElement.dataset.theme` and persists the choice. The OS
+`prefers-color-scheme` setting is intentionally not consulted for the initial
+theme -- only an explicit stored/toggled choice can turn the page light.
+
+Design tokens are raw CSS custom properties in `src/styles/tokens.css`
+(`--ov-color-*`, `--ov-space-*`, `--ov-radius-*`, `--ov-font-*`, `--ov-text-*`),
+mapped into Tailwind's `@theme` in `src/index.css` so components use ordinary
+utilities (`bg-surface`, `text-status-critical`, `rounded-md`, ...) instead of
+hard-coded colors.
+
+## Live data (`useLiveStream`)
+
+`useLiveStream` (`src/hooks/useLiveStream.ts`) owns the app's single WebSocket
+connection to the backend's `/ws/sensors` endpoint. It is called exactly once,
+inside `AppShell`, and its state is shared to the rest of the tree through
+`LiveStreamContext` -- no other component should call `useLiveStream` directly,
+or a second, redundant socket opens.
+
+Behavior:
+
+- Parses each frame as a typed `{ kind: "reading" | "alert", payload }`
+  envelope via a small dependency-free runtime type guard
+  (`src/lib/parseLiveEnvelope.ts`); malformed JSON, a malformed known-kind
+  payload, or an unrecognised `kind` are all ignored safely, with no state
+  change and no reconnect.
+- Reconnects on an unexpected close with deterministic exponential backoff:
+  1s, 2s, 4s, 8s, capped at 10s. The delay resets to 1s after a successful
+  reconnect. No jitter.
+- On any unexpected disconnect, both `latestReadings` and the live `alerts`
+  buffer are cleared and `connectionState` moves to `"reconnecting"` -- a
+  dropped connection can mean missed transitions, so nothing from the old
+  connection is kept as if it were still current. This buffer is a live
+  foundation only, not historical/authoritative alert state (that is a REST
+  concern for a later issue).
+- Cleans up on unmount: cancels any pending reconnect timer and closes the
+  socket without scheduling a further reconnect.
+
+The connection state (`connecting` / `connected` / `reconnecting` /
+`disconnected`) is shown in `AppShell`'s top bar.
 
 ## Runtime reverse proxy (backend upstream)
 
@@ -35,6 +104,18 @@ so a short Service name would return NXDOMAIN in-cluster.
 No cluster DNS server / CoreDNS / node IP is hardcoded anywhere; the resolver
 address is still discovered at runtime from the container's `/etc/resolv.conf`
 by the image entrypoint.
+
+### Environment variables
+
+| Variable | Used by | Purpose |
+| --- | --- | --- |
+| `VITE_API_URL` | dev build only | Backend REST origin for local `npm run dev` |
+| `VITE_WS_URL` | dev build only | Explicit WebSocket URL override; when unset, `useLiveStream` derives `ws(s)://<current origin>/ws/sensors` from the browser location |
+| `BACKEND_UPSTREAM` | Nginx (runtime) | Backend `host:port` the container's reverse proxy targets |
+
+`.env.development` sets the first two for local `npm run dev` against a
+directly-reachable backend; `.env.production` only sets `VITE_API_URL=/api`,
+since the production bundle always goes through the same-origin Nginx proxy.
 
 ### Remaining live validation
 

@@ -1,0 +1,70 @@
+/*
+ * Raw design tokens (issue #74). Prefixed `--ov-*` so they never collide with
+ * Tailwind v4's own `@theme` namespace variables (`--color-*`, `--radius-*`,
+ * `--font-*`, ...) -- those are mapped from these in index.css.
+ *
+ * Dark is the unconditional default: the bare `:root` block below IS the
+ * dark palette. There is no `prefers-color-scheme` query here on purpose --
+ * the application default must not silently flip to light based on the OS
+ * setting. `[data-theme="light"]` (set explicitly by ThemeProvider, from a
+ * persisted choice or an in-app toggle) is the only thing that can turn the
+ * page light.
+ */
+
+:root {
+  --ov-color-background: #0b0f14;
+  --ov-color-surface: #131a22;
+  --ov-color-surface-raised: #1b232d;
+  --ov-color-border: #263241;
+  --ov-color-foreground: #e6edf3;
+  --ov-color-muted: #93a3b3;
+  --ov-color-accent: #4da3ff;
+  --ov-color-status-ok: #3fb950;
+  --ov-color-status-warning: #d29922;
+  --ov-color-status-critical: #f85149;
+
+  --ov-radius-sm: 0.25rem;
+  --ov-radius-md: 0.5rem;
+  --ov-radius-lg: 0.75rem;
+
+  --ov-space-xs: 0.25rem;
+  --ov-space-sm: 0.5rem;
+  --ov-space-md: 1rem;
+  --ov-space-lg: 1.5rem;
+  --ov-space-xl: 2.5rem;
+
+  --ov-font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --ov-font-mono: ui-monospace, SFMono-Regular, 'Cascadia Code', monospace;
+  --ov-text-sm: 0.875rem;
+  --ov-text-base: 1rem;
+  --ov-text-lg: 1.25rem;
+  --ov-leading-normal: 1.5;
+}
+
+/* Explicit mirror of the default, so re-selecting dark never relies on the
+   bare :root fallback still being dark. */
+:root[data-theme='dark'] {
+  --ov-color-background: #0b0f14;
+  --ov-color-surface: #131a22;
+  --ov-color-surface-raised: #1b232d;
+  --ov-color-border: #263241;
+  --ov-color-foreground: #e6edf3;
+  --ov-color-muted: #93a3b3;
+  --ov-color-accent: #4da3ff;
+  --ov-color-status-ok: #3fb950;
+  --ov-color-status-warning: #d29922;
+  --ov-color-status-critical: #f85149;
+}
+
+:root[data-theme='light'] {
+  --ov-color-background: #f7f9fb;
+  --ov-color-surface: #ffffff;
+  --ov-color-surface-raised: #eef1f4;
+  --ov-color-border: #d9e0e7;
+  --ov-color-foreground: #101418;
+  --ov-color-muted: #55606b;
+  --ov-color-accent: #1f6feb;
+  --ov-color-status-ok: #1a7f37;
+  --ov-color-status-warning: #9a6700;
+  --ov-color-status-critical: #cf222e;
+}
