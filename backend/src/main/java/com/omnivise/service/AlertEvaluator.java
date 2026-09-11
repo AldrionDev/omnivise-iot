@@ -1,22 +1,13 @@
 package com.omnivise.service;
 
 import java.time.Instant;
-import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
 
-import org.bson.Document;
-import org.bson.types.ObjectId;
-
-import com.mongodb.client.MongoCollection;
-import com.mongodb.client.model.Filters;
-import com.mongodb.client.model.Updates;
-import com.mongodb.client.result.InsertOneResult;
 import com.omnivise.handler.AlertMessage;
 import com.omnivise.handler.WebSocketHandler;
-import com.omnivise.mapper.AlertEventMapper;
 import com.omnivise.model.AlertEvent;
 import com.omnivise.model.AlertRule;
 import com.omnivise.model.Device;
@@ -44,7 +35,7 @@ import com.omnivise.webhook.AlertWebhook;
  */
 public class AlertEvaluator {
 
-    private final MongoCollection<Document> events;
+    private final AlertService alertService;
     private final List<AlertRule> rules;
     private final DeviceService devices;
     private final WebSocketHandler wsHandler;
@@ -59,23 +50,23 @@ public class AlertEvaluator {
 
     /** Production wiring: evaluate the enabled seeded rules, real clock. */
     public AlertEvaluator(
-            MongoCollection<Document> events,
+            AlertService alertService,
             AlertRuleService ruleService,
             DeviceService devices,
             WebSocketHandler wsHandler,
             AlertWebhook webhook) {
-        this(events, ruleService.getRules(), devices, wsHandler, webhook, Instant::now);
+        this(alertService, ruleService.getRules(), devices, wsHandler, webhook, Instant::now);
     }
 
     /** Test seam: explicit rule list and clock. */
     AlertEvaluator(
-            MongoCollection<Document> events,
+            AlertService alertService,
             List<AlertRule> rules,
             DeviceService devices,
             WebSocketHandler wsHandler,
             AlertWebhook webhook,
             Supplier<Instant> clock) {
-        this.events = events;
+        this.alertService = alertService;
         this.rules = List.copyOf(rules);
         this.devices = devices;
         this.wsHandler = wsHandler;
@@ -121,14 +112,11 @@ public class AlertEvaluator {
 
     private void onFire(AlertRule rule, SensorReading reading, double value, Key key) {
         String startedAt = clock.get().toString();
-        AlertEvent pending = new AlertEvent(null, rule.ruleId(), reading.deviceId(),
+        AlertEvent pending = new AlertEvent(null, 0, rule.ruleId(), reading.deviceId(),
                 reading.channel(), rule.severity(), AlertEvent.STATE_FIRING,
                 value, value, startedAt, null);
 
-        InsertOneResult result = events.insertOne(AlertEventMapper.toDocument(pending)); // (1) persist
-        String id = result.getInsertedId().asObjectId().getValue().toHexString();
-
-        AlertEvent persisted = withId(pending, id);
+        AlertEvent persisted = alertService.insertFiring(pending);                       // (1) persist
         firing.put(key, persisted);                                                     // (2) state
         wsHandler.broadcast(AlertMessage.of(persisted));                                // (3) WS
         safeDispatch(persisted);                                                        // (4) webhook
@@ -136,27 +124,20 @@ public class AlertEvaluator {
 
     private void onClear(SensorReading reading, double value, Key key, AlertEvent current) {
         String resolvedAt = clock.get().toString();
-        events.updateOne(                                                               // (1) persist
-                Filters.eq("_id", new ObjectId(current.id())),
-                Updates.combine(
-                        Updates.set("state", AlertEvent.STATE_RESOLVED),
-                        Updates.set("lastValue", value),
-                        Updates.set("resolvedAt", Date.from(Instant.parse(resolvedAt)))));
+        AlertEvent resolved = alertService.resolve(current, value, resolvedAt).orElse(null); // (1) persist
+        if (resolved == null) {
+            return;
+        }
 
         firing.remove(key);                                                             // (2) state
-        AlertEvent resolved = new AlertEvent(current.id(), current.ruleId(),
-                current.deviceId(), current.channel(), current.severity(),
-                AlertEvent.STATE_RESOLVED, current.triggeredValue(), value,
-                current.startedAt(), resolvedAt);
         wsHandler.broadcast(AlertMessage.of(resolved));                                 // (3) WS
         safeDispatch(resolved);                                                         // (4) webhook
     }
 
     private void onRepeatedBreach(double value, Key key, AlertEvent current) {
-        events.updateOne(                                                               // persist only
-                Filters.eq("_id", new ObjectId(current.id())),
-                Updates.set("lastValue", value));
-        firing.put(key, withLastValue(current, value));
+        if (alertService.updateLastValue(current, value)) {                              // persist only
+            firing.put(key, withLastValue(current, value));
+        }
         // no state change, no WS, no webhook
     }
 
@@ -169,8 +150,7 @@ public class AlertEvaluator {
     }
 
     private void recoverFiringState() {
-        events.find(new Document("state", AlertEvent.STATE_FIRING)).forEach((Document doc) -> {
-            AlertEvent event = AlertEventMapper.fromDocument(doc);
+        alertService.findFiring().forEach(event -> {
             Key key = new Key(event.ruleId(), event.deviceId(), event.channel());
             AlertEvent previous = firing.putIfAbsent(key, event);
             if (previous != null) {
@@ -184,13 +164,8 @@ public class AlertEvaluator {
         }
     }
 
-    private static AlertEvent withId(AlertEvent e, String id) {
-        return new AlertEvent(id, e.ruleId(), e.deviceId(), e.channel(), e.severity(),
-                e.state(), e.triggeredValue(), e.lastValue(), e.startedAt(), e.resolvedAt());
-    }
-
     private static AlertEvent withLastValue(AlertEvent e, double lastValue) {
-        return new AlertEvent(e.id(), e.ruleId(), e.deviceId(), e.channel(), e.severity(),
+        return new AlertEvent(e.id(), e.sequence(), e.ruleId(), e.deviceId(), e.channel(), e.severity(),
                 e.state(), e.triggeredValue(), lastValue, e.startedAt(), e.resolvedAt());
     }
 }

@@ -1,3 +1,6 @@
+import { isAlertEvent } from './parseLiveEnvelope'
+import type { AlertEvent } from '../types/domain'
+
 const API_BASE_URL = import.meta.env.VITE_API_URL ?? ''
 
 export interface ApiErrorBody {
@@ -43,4 +46,40 @@ export async function fetchJson<T>(path: string, options: FetchJsonOptions = {})
   }
 
   return (await response.json()) as T
+}
+
+export interface AlertsSnapshot {
+  items: AlertEvent[]
+  watermark: number
+}
+
+/** Reads and validates the atomic alert snapshot contract. */
+export async function fetchAlertsSnapshot(path: string, signal: AbortSignal): Promise<AlertsSnapshot> {
+  const response = await fetch(`${API_BASE_URL}${path}`, { signal })
+  if (!response.ok) {
+    let body: ApiErrorBody | null = null
+    try {
+      body = await response.json()
+    } catch {
+      body = null
+    }
+    throw new ApiError(response.status, body)
+  }
+
+  const rawWatermark = response.headers.get('X-Alert-Watermark')
+  const watermark = rawWatermark !== null && /^(0|[1-9]\d*)$/.test(rawWatermark)
+    ? Number(rawWatermark)
+    : Number.NaN
+  const body: unknown = await response.json()
+  if (
+    !Number.isSafeInteger(watermark) ||
+    watermark < 0 ||
+    !Array.isArray(body) ||
+    !body.every(isAlertEvent) ||
+    body.some((alert) => alert.sequence > watermark)
+  ) {
+    throw new Error('Invalid alert snapshot response')
+  }
+
+  return { items: body, watermark }
 }

@@ -12,6 +12,7 @@ package com.omnivise.model;
  * once {@value #STATE_RESOLVED}.
  *
  * @param id             Mongo {@code _id} hex string; {@code null} before insert
+ * @param sequence       global alert transition sequence; legacy events use zero
  * @param ruleId         the rule that produced this event
  * @param deviceId       the breaching device
  * @param channel        the breaching channel
@@ -24,6 +25,7 @@ package com.omnivise.model;
  */
 public record AlertEvent(
         String id,
+        long sequence,
         String ruleId,
         String deviceId,
         String channel,
@@ -36,4 +38,10 @@ public record AlertEvent(
 ) {
     public static final String STATE_FIRING = "firing";
     public static final String STATE_RESOLVED = "resolved";
+
+    public AlertEvent {
+        if (sequence < 0) {
+            throw new IllegalArgumentException("sequence must be nonnegative");
+        }
+    }
 }

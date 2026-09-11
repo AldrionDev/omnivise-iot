@@ -52,7 +52,14 @@ interface MockRoutes {
 }
 
 function jsonResponse(body: unknown, status = 200) {
-  return Promise.resolve(new Response(JSON.stringify(body), { status }))
+  const alerts = Array.isArray(body)
+    ? body.filter((item): item is AlertEvent => typeof item === 'object' && item !== null && 'sequence' in item)
+    : []
+  const watermark = Math.max(0, ...alerts.map((item) => item.sequence))
+  return Promise.resolve(new Response(JSON.stringify(body), {
+    status,
+    headers: { 'X-Alert-Watermark': String(watermark) },
+  }))
 }
 
 function mockFetch(routes: MockRoutes) {
@@ -99,6 +106,7 @@ function mockFetch(routes: MockRoutes) {
 
 function alertPayload(overrides: Partial<AlertEvent>): AlertEvent {
   return {
+    sequence: overrides.state === 'resolved' ? 3 : overrides.severity === 'critical' ? 2 : 1,
     id: 'live-1',
     ruleId: 'rack-intake-temp-high',
     deviceId: 'rack-a1',
@@ -122,11 +130,8 @@ function currentSocket(): MockWebSocket {
 }
 
 function sendAlert(alert: AlertEvent) {
-  // Wrapped in act() so the alerts-buffer state update (and the effect that
-  // delivers it to useLiveAlertTransitions consumers) is flushed
-  // synchronously -- required to deterministically land a live transition
-  // while a REST snapshot promise is still unresolved (issue #75 M1 race
-  // tests below rely on this ordering, not on eventual-consistency polling).
+  // Direct subscribers enqueue their pure React updates synchronously; act()
+  // flushes those updates before race tests resolve a pending REST snapshot.
   act(() => {
     currentSocket().triggerMessage(JSON.stringify({ kind: 'alert', payload: alert }))
   })
@@ -423,6 +428,7 @@ describe('DeviceDetailPage recent alerts', () => {
       devices: { 'rack-a1': RACK_A1 },
       alerts: [
         {
+          sequence: 1,
           id: 'a2',
           ruleId: 'r1',
           deviceId: 'rack-a1',
@@ -470,11 +476,15 @@ describe('DeviceDetailPage live alert reaction', () => {
 
     const socket = currentSocket()
     socket.triggerOpen()
-    const fetchCallsBefore = vi.mocked(fetch).mock.calls.length
+    const alertCallsBefore = vi.mocked(fetch).mock.calls.filter(
+      ([input]) => String(input).includes('/alerts'),
+    ).length
     sendAlert(alertPayload({ id: 'live-1', channel: 'intake_temp', state: 'firing' }))
 
     expect(await screen.findByText('intake_temp · firing')).toBeTruthy()
-    expect(vi.mocked(fetch).mock.calls.length).toBe(fetchCallsBefore)
+    expect(vi.mocked(fetch).mock.calls.filter(
+      ([input]) => String(input).includes('/alerts'),
+    )).toHaveLength(alertCallsBefore)
   })
 
   it('updates the same row on a resolved transition instead of duplicating it', async () => {
@@ -569,7 +579,7 @@ describe('DeviceDetailPage live alert reaction', () => {
     await screen.findByText('ch-0 · firing')
     currentSocket().triggerOpen()
 
-    sendAlert(alertPayload({ id: 'brand-new', channel: 'humidity', state: 'firing' }))
+    sendAlert(alertPayload({ sequence: 2, id: 'brand-new', channel: 'humidity', state: 'firing' }))
 
     expect(await screen.findByText('humidity · firing')).toBeTruthy()
     expect(screen.queryAllByText(/· firing|· resolved/)).toHaveLength(20)
@@ -647,8 +657,8 @@ describe('DeviceDetailPage snapshot-vs-live-alert race (issue #75 M1)', () => {
     )
 
     return {
-      resolveActive: (items: AlertEvent[]) => resolveActive?.(new Response(JSON.stringify(items), { status: 200 })),
-      resolveRecent: (items: AlertEvent[]) => resolveRecent?.(new Response(JSON.stringify(items), { status: 200 })),
+      resolveActive: (items: AlertEvent[]) => resolveActive?.(new Response(JSON.stringify(items), { status: 200, headers: { 'X-Alert-Watermark': String(Math.max(0, ...items.map((item) => item.sequence))) } })),
+      resolveRecent: (items: AlertEvent[]) => resolveRecent?.(new Response(JSON.stringify(items), { status: 200, headers: { 'X-Alert-Watermark': String(Math.max(0, ...items.map((item) => item.sequence))) } })),
     }
   }
 
@@ -758,7 +768,7 @@ describe('DeviceDetailPage snapshot-vs-live-alert race (issue #75 M1)', () => {
 
       // The stale resync snapshot resolves without it -- it was queried
       // before the alert fired, so it must not wipe out the live update.
-      resolveResyncActive?.(new Response(JSON.stringify([]), { status: 200 }))
+      resolveResyncActive?.(new Response(JSON.stringify([]), { status: 200, headers: { 'X-Alert-Watermark': '0' } }))
 
       // Give the stale response every chance to (incorrectly) win before
       // asserting the final state stays correct.

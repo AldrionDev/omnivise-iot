@@ -1,18 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { useParams } from 'react-router'
 import { Badge, type BadgeVariant } from '../components/Badge'
 import { EmptyState } from '../components/EmptyState'
 import { Button } from '../components/Button'
 import { TimeSeriesChart, type TimeSeriesChartStatus } from '../components/TimeSeriesChart'
-import { useLiveAlertTransitions } from '../hooks/useLiveAlertTransitions'
+import { useAlertsSnapshot } from '../hooks/useAlertsSnapshot'
 import { useLiveStreamContext } from '../hooks/LiveStreamContext'
-import { useReconnectResync } from '../hooks/useReconnectResync'
-import {
-  mergeActiveAlert,
-  mergeRecentAlert,
-  replayActiveAlerts,
-  replayRecentAlerts,
-} from '../lib/alertMerge'
 import { ApiError, fetchJson } from '../lib/api'
 import { deriveDeviceStatus, type DeviceStatus } from '../lib/deviceStatus'
 import { HISTORY_RANGES, resolveHistoryWindow, type HistoryRange } from '../lib/range'
@@ -82,28 +75,24 @@ function ChannelCard({ channel, liveValue, children }: ChannelCardProps) {
 export function DeviceDetailPage() {
   const { deviceId } = useParams<{ deviceId: string }>()
   const { latestReadings } = useLiveStreamContext()
-  const resyncToken = useReconnectResync()
 
   const [deviceState, setDeviceState] = useState<DeviceState>({ status: 'loading' })
-  const [activeAlerts, setActiveAlerts] = useState<ListState<AlertEvent>>({ status: 'loading' })
+  const encodedDeviceId = deviceId ? encodeURIComponent(deviceId) : ''
+  const activeAlerts = useAlertsSnapshot(
+    `/alerts/active?deviceId=${encodedDeviceId}`,
+    'active',
+    20,
+    deviceId,
+  )
   const [rules, setRules] = useState<ListState<AlertRule>>({ status: 'loading' })
-  const [recentAlerts, setRecentAlerts] = useState<ListState<AlertEvent>>({ status: 'loading' })
+  const recentAlerts = useAlertsSnapshot(
+    `/alerts?deviceId=${encodedDeviceId}&limit=${RECENT_ALERTS_LIMIT}`,
+    'recent',
+    RECENT_ALERTS_LIMIT,
+    deviceId,
+  )
   const [range, setRange] = useState<HistoryRange>(DEFAULT_RANGE)
   const [channelHistory, setChannelHistory] = useState<Record<string, ChannelHistoryState>>({})
-
-  // Buffers for live alert transitions that arrive while the corresponding
-  // REST snapshot fetch is in flight (issue #75 M1): a snapshot query can be
-  // answered by the backend before an alert that already reached us over the
-  // WebSocket was inserted, so applying that snapshot naively can lose or
-  // overwrite the live update. While *Ref.current is true, a transition for
-  // this device is queued here instead of merged into visible state; once
-  // the fetch resolves, the queue is replayed on top of the snapshot (in
-  // arrival order) and cleared. Reset at the top of each fetch effect run so
-  // a stale buffer never survives into a new device or a new resync.
-  const activeAlertsBufferRef = useRef<AlertEvent[]>([])
-  const activeAlertsInFlightRef = useRef(true)
-  const recentAlertsBufferRef = useRef<AlertEvent[]>([])
-  const recentAlertsInFlightRef = useRef(true)
 
   useEffect(() => {
     if (!deviceId) {
@@ -134,59 +123,6 @@ export function DeviceDetailPage() {
       return
     }
     let current = true
-    activeAlertsBufferRef.current = []
-    activeAlertsInFlightRef.current = true
-
-    fetchJson<AlertEvent[]>(`/alerts/active?deviceId=${encodeURIComponent(deviceId)}`)
-      .then((items) => {
-        if (!current) {
-          return
-        }
-        const replayed = replayActiveAlerts(items, activeAlertsBufferRef.current)
-        activeAlertsBufferRef.current = []
-        activeAlertsInFlightRef.current = false
-        setActiveAlerts({ status: 'loaded', items: replayed })
-      })
-      .catch(() => {
-        if (!current) {
-          return
-        }
-        // Snapshot-and-clear happens here, in the (already request-current-
-        // guarded) catch body -- NOT inside the setState updater below. A
-        // setState updater must be pure (React may invoke it more than once,
-        // e.g. under StrictMode, keeping only the last result); reading and
-        // clearing a ref from inside it would make the first invocation's
-        // clear invisible to -- and unrecoverable by -- the second, silently
-        // dropping the buffered transitions (issue #75 review finding B1).
-        const buffered = activeAlertsBufferRef.current
-        activeAlertsBufferRef.current = []
-        activeAlertsInFlightRef.current = false
-        setActiveAlerts((prev) =>
-          // A refetch (resync) failing while we already have good data must
-          // not blank the badge -- keep serving the stale-but-live-patched
-          // state. Only a genuine first-load failure (no prior snapshot to
-          // build on) falls back to the error state; a later successful
-          // fetch/resync gets a fresh authoritative query from the backend
-          // regardless, so nothing buffered here is lost forever.
-          prev.status === 'loaded'
-            ? { status: 'loaded', items: replayActiveAlerts(prev.items, buffered) }
-            : { status: 'error' },
-        )
-      })
-
-    return () => {
-      current = false
-    }
-    // resyncToken: re-fetch the authoritative snapshot after a reconnect --
-    // #74 clears its live alert buffer on every disconnect, so transitions
-    // missed while down must come from REST, not be assumed from the buffer.
-  }, [deviceId, resyncToken])
-
-  useEffect(() => {
-    if (!deviceId) {
-      return
-    }
-    let current = true
 
     fetchJson<AlertRule[]>(`/alerts/rules?deviceId=${encodeURIComponent(deviceId)}`)
       .then((items) => current && setRules({ status: 'loaded', items }))
@@ -196,68 +132,6 @@ export function DeviceDetailPage() {
       current = false
     }
   }, [deviceId])
-
-  useEffect(() => {
-    if (!deviceId) {
-      return
-    }
-    let current = true
-    recentAlertsBufferRef.current = []
-    recentAlertsInFlightRef.current = true
-
-    fetchJson<AlertEvent[]>(
-      `/alerts?deviceId=${encodeURIComponent(deviceId)}&limit=${RECENT_ALERTS_LIMIT}`,
-    )
-      .then((items) => {
-        if (!current) {
-          return
-        }
-        const replayed = replayRecentAlerts(items, recentAlertsBufferRef.current, RECENT_ALERTS_LIMIT)
-        recentAlertsBufferRef.current = []
-        recentAlertsInFlightRef.current = false
-        setRecentAlerts({ status: 'loaded', items: replayed })
-      })
-      .catch(() => {
-        if (!current) {
-          return
-        }
-        // See the activeAlerts catch above: snapshot-and-clear must happen
-        // here, not inside the setState updater, so the updater stays pure.
-        const buffered = recentAlertsBufferRef.current
-        recentAlertsBufferRef.current = []
-        recentAlertsInFlightRef.current = false
-        setRecentAlerts((prev) =>
-          prev.status === 'loaded'
-            ? { status: 'loaded', items: replayRecentAlerts(prev.items, buffered, RECENT_ALERTS_LIMIT) }
-            : { status: 'error' },
-        )
-      })
-
-    return () => {
-      current = false
-    }
-    // resyncToken: see the activeAlerts effect above for why.
-  }, [deviceId, resyncToken])
-
-  useLiveAlertTransitions((alert) => {
-    if (alert.deviceId !== deviceId) {
-      return
-    }
-    if (activeAlertsInFlightRef.current) {
-      activeAlertsBufferRef.current.push(alert)
-    } else {
-      setActiveAlerts((prev) =>
-        prev.status !== 'loaded' ? prev : { status: 'loaded', items: mergeActiveAlert(prev.items, alert) },
-      )
-    }
-    if (recentAlertsInFlightRef.current) {
-      recentAlertsBufferRef.current.push(alert)
-    } else {
-      setRecentAlerts((prev) =>
-        prev.status !== 'loaded' ? prev : { status: 'loaded', items: mergeRecentAlert(prev.items, alert) },
-      )
-    }
-  })
 
   const numericChannels = useMemo(
     () =>

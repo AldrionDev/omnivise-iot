@@ -416,6 +416,42 @@ function seedAlertSchema() {
   REQUIRED_ALERT_EVENT_INDEXES.forEach((key) => db.alert_events.createIndex(key));
 }
 
+// #94 ordering metadata is additive. Legacy alert documents deliberately stay
+// untouched and map to sequence 0; the counter starts at the greatest sequence
+// already present, or zero for a legacy/fresh volume.
+function alertSequenceBootstrap() {
+  const latest = db.alert_events
+    .find({ sequence: { $type: "number" } })
+    .sort({ sequence: -1 })
+    .limit(1)
+    .toArray();
+  const maxSequence = latest.length
+    ? NumberLong(latest[0].sequence.toString())
+    : NumberLong("0");
+  const current = db.alert_sequences.findOne({ _id: "global" });
+
+  if (!current) {
+    db.alert_sequences.insertOne({ _id: "global", value: maxSequence });
+    print("✅ alert sequence counter initialised at " + maxSequence);
+    return;
+  }
+  const validCounter = db.alert_sequences.countDocuments({
+    _id: "global",
+    value: { $gte: NumberLong("0") },
+    $or: [{ value: { $type: "int" } }, { value: { $type: "long" } }],
+  });
+  if (validCounter !== 1) {
+    reportAndExit(
+      ["alert_sequences: global value must be a nonnegative BSON integer"],
+      "alert sequence state is inconsistent",
+    );
+  }
+  if (current.value < maxSequence) {
+    db.alert_sequences.updateOne({ _id: "global" }, { $set: { value: maxSequence } });
+    print("✅ alert sequence counter advanced to existing maximum " + maxSequence);
+  }
+}
+
 function alertBootstrap() {
   const rulesCount = db.alert_rules.countDocuments();
   const eventsExist = db.getCollectionNames().indexOf("alert_events") !== -1;
@@ -509,5 +545,6 @@ if (isFresh) {
 // schema here and succeeds; a completed state validates; a partial state exits
 // non-zero (reportAndExit).
 alertBootstrap();
+alertSequenceBootstrap();
 
 quit(0);

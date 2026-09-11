@@ -80,7 +80,7 @@ public class Main {
         System.out.println("🔌 WebSocket handler initialized");
 
         AlertEvaluator alertEvaluator = new AlertEvaluator(
-                alertService.getCollection(),
+                alertService,
                 alertRuleService,
                 deviceService,
                 wsHandler,
@@ -116,6 +116,7 @@ public class Main {
             config.bundledPlugins.enableCors(cors -> {
                 cors.addRule(it -> {
                     it.anyHost();
+                    it.exposeHeader(AlertService.WATERMARK_HEADER);
                 });
             });
 
@@ -195,7 +196,9 @@ public class Main {
                 ctx.status(400).json(invalid);
                 return;
             }
-            ctx.json(alertService.find(((AlertQuery.Valid) parsed).query()));
+            AlertService.Snapshot snapshot = alertService.findSnapshot(((AlertQuery.Valid) parsed).query());
+            ctx.header(AlertService.WATERMARK_HEADER, Long.toString(snapshot.watermark()));
+            ctx.json(snapshot.events());
         });
 
         // Convenience for state=firing; the caller cannot override state.
@@ -209,7 +212,9 @@ public class Main {
                 ctx.status(400).json(invalid);
                 return;
             }
-            ctx.json(alertService.find(((AlertQuery.Valid) parsed).query()));
+            AlertService.Snapshot snapshot = alertService.findSnapshot(((AlertQuery.Valid) parsed).query());
+            ctx.header(AlertService.WATERMARK_HEADER, Long.toString(snapshot.watermark()));
+            ctx.json(snapshot.events());
         });
 
         // Seeded, read-only threshold-rule registry (issue #73), exposed read-only

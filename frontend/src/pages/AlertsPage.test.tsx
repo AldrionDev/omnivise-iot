@@ -25,6 +25,7 @@ const UPS_1: Device = {
 
 function alert(overrides: Partial<AlertEvent>): AlertEvent {
   return {
+    sequence: overrides.state === 'resolved' ? 3 : overrides.severity === 'critical' ? 2 : 1,
     id: 'a1',
     ruleId: 'rack-high-temp',
     deviceId: 'rack-a1',
@@ -39,13 +40,18 @@ function alert(overrides: Partial<AlertEvent>): AlertEvent {
   }
 }
 
+function alertResponse(items: AlertEvent[]) {
+  const watermark = Math.max(0, ...items.map((item) => item.sequence))
+  return new Response(JSON.stringify(items), { status: 200, headers: { 'X-Alert-Watermark': String(watermark) } })
+}
+
 function mockFetchJson(alerts: AlertEvent[], devices: Device[] = [RACK_A1, UPS_1]) {
   vi.stubGlobal(
     'fetch',
     vi.fn((input: string | URL) => {
       const url = String(input)
       if (url.includes('/alerts')) {
-        return Promise.resolve(new Response(JSON.stringify(alerts), { status: 200 }))
+        return Promise.resolve(alertResponse(alerts))
       }
       if (url.includes('/devices')) {
         return Promise.resolve(new Response(JSON.stringify(devices), { status: 200 }))
@@ -280,7 +286,7 @@ describe('AlertsPage snapshot-vs-live-alert race', () => {
     )
 
     return {
-      resolveAlerts: (items: AlertEvent[]) => resolveAlerts?.(new Response(JSON.stringify(items), { status: 200 })),
+      resolveAlerts: (items: AlertEvent[]) => resolveAlerts?.(alertResponse(items)),
     }
   }
 
@@ -313,7 +319,7 @@ describe('AlertsPage resync failure preserves buffered alerts under StrictMode',
         const url = String(input)
         if (url.includes('/alerts?limit=')) {
           if (!resyncArmed) {
-            return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }))
+            return Promise.resolve(alertResponse([]))
           }
           resyncRequestCount += 1
           return new Promise<Response>((_resolve, reject) => {

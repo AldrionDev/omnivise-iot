@@ -26,6 +26,7 @@ const VALID_DOOR_READING = {
 const VALID_ALERT = {
   kind: 'alert',
   payload: {
+    sequence: 1,
     id: '65f0000000000000000000a1',
     ruleId: 'rack-a1-high-temp',
     deviceId: 'rack-a1',
@@ -109,6 +110,16 @@ describe('parseLiveEnvelope', () => {
     const { severity: _severity, ...rest } = VALID_ALERT.payload
     expect(parseLiveEnvelope(JSON.stringify({ kind: 'alert', payload: rest }))).toBeNull()
   })
+
+  it.each([undefined, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+    'rejects an alert with invalid sequence %s',
+    (sequence) => {
+      expect(parseLiveEnvelope(JSON.stringify({
+        kind: 'alert',
+        payload: { ...VALID_ALERT.payload, sequence },
+      }))).toBeNull()
+    },
+  )
 
   it('rejects an alert envelope with an invalid severity', () => {
     expect(

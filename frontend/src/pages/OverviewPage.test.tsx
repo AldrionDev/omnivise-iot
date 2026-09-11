@@ -48,6 +48,7 @@ const ALL_DEVICES = [RACK_A1, RACK_A2, PDU_A1, UPS_1]
 
 function alert(overrides: Partial<AlertEvent>): AlertEvent {
   return {
+    sequence: overrides.state === 'resolved' ? 3 : overrides.severity === 'critical' ? 2 : 1,
     id: 'a1',
     ruleId: 'r1',
     deviceId: 'rack-a1',
@@ -60,6 +61,11 @@ function alert(overrides: Partial<AlertEvent>): AlertEvent {
     resolvedAt: null,
     ...overrides,
   }
+}
+
+function alertResponse(items: AlertEvent[]) {
+  const watermark = Math.max(0, ...items.map((item) => item.sequence))
+  return new Response(JSON.stringify(items), { status: 200, headers: { 'X-Alert-Watermark': String(watermark) } })
 }
 
 function emptyHistory(deviceId: string, channel: string): SensorHistory {
@@ -78,7 +84,7 @@ function mockFetch({ devices = ALL_DEVICES, activeAlerts = [], history }: MockFe
     vi.fn((input: string | URL) => {
       const url = String(input)
       if (url.includes('/alerts/active')) {
-        return Promise.resolve(new Response(JSON.stringify(activeAlerts), { status: 200 }))
+        return Promise.resolve(alertResponse(activeAlerts))
       }
       if (url.includes('/sensors/history')) {
         const params = new URL(url, 'http://test.local').searchParams
@@ -338,7 +344,7 @@ describe('OverviewPage sparklines', () => {
           })
         }
         if (url.includes('/alerts/active')) {
-          return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }))
+          return Promise.resolve(alertResponse([]))
         }
         return Promise.resolve(new Response(JSON.stringify([UPS_1]), { status: 200 }))
       }),
@@ -366,7 +372,7 @@ describe('OverviewPage sparklines', () => {
           return Promise.resolve(new Response('boom', { status: 500 }))
         }
         if (url.includes('/alerts/active')) {
-          return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }))
+          return Promise.resolve(alertResponse([]))
         }
         return Promise.resolve(new Response(JSON.stringify([UPS_1]), { status: 200 }))
       }),

@@ -246,6 +246,7 @@ docker compose config
 {
   "kind": "alert",
   "payload": {
+    "sequence": 42,
     "id": "66f2a1b3c4d5e6f7a8b9c0d1",
     "ruleId": "rack-intake-temp-high",
     "deviceId": "rack-a1",
@@ -273,6 +274,14 @@ docker compose config
 | GET | `/api/alerts` | `state` (firing\|resolved), `severity` (warning\|critical), `deviceId`, `limit` (1–500, default 100) | All alert events matching the filters, newest first |
 | GET | `/api/alerts/active` | `severity`, `deviceId`, `limit` | Convenience endpoint for `state=firing`; state cannot be overridden |
 | GET | `/api/alerts/rules` | `deviceId` (optional; must be a known device if provided) | Seeded alert rules; without `deviceId`, returns all enabled rules; with `deviceId`, returns only rules applicable to that device. Unknown `deviceId` returns 400. |
+
+Every firing/resolved alert transition carries a global monotonically increasing
+`sequence`. Both alert-list endpoints retain their JSON array body and return an
+`X-Alert-Watermark` response header. The body and watermark are read from the
+same MongoDB snapshot: the body reflects all committed alert transitions through
+the watermark. Clients may apply only transitions with `sequence` greater than
+that watermark after installing a snapshot. Legacy persisted alerts without a
+sequence are exposed with sequence `0`.
 
 ## Frontend Routes
 

@@ -26,6 +26,7 @@ public final class AlertEventMapper {
         Object rawId = doc.get("_id");
         return new AlertEvent(
                 rawId == null ? null : rawId.toString(),
+                toSequence(doc.get("sequence")),
                 doc.getString("ruleId"),
                 doc.getString("deviceId"),
                 doc.getString("channel"),
@@ -42,7 +43,8 @@ public final class AlertEventMapper {
         if (event.id() != null) {
             doc.append("_id", new ObjectId(event.id()));
         }
-        doc.append("ruleId", event.ruleId())
+        doc.append("sequence", event.sequence())
+                .append("ruleId", event.ruleId())
                 .append("deviceId", event.deviceId())
                 .append("channel", event.channel())
                 .append("severity", event.severity())
@@ -61,6 +63,19 @@ public final class AlertEventMapper {
             return number.doubleValue();
         }
         throw new IllegalArgumentException("alert_events: expected a numeric value, got " + value);
+    }
+
+    private static long toSequence(Object value) {
+        if (value == null) {
+            return 0L;
+        }
+        if (value instanceof Number number) {
+            long sequence = number.longValue();
+            if (sequence >= 0 && number.doubleValue() == sequence) {
+                return sequence;
+            }
+        }
+        throw new IllegalArgumentException("alert_events: expected a nonnegative integer sequence, got " + value);
     }
 
     private static String toIso(Object timestamp) {

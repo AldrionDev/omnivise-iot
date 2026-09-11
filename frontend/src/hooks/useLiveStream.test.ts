@@ -13,6 +13,7 @@ const READING_A = {
 }
 
 const ALERT_A = {
+  sequence: 1,
   id: '65f0000000000000000000a1',
   ruleId: 'rack-a1-high-temp',
   deviceId: 'rack-a1',
@@ -74,13 +75,20 @@ describe('useLiveStream', () => {
     expect(result.current.latestReadings['rack-a1::intake_temp']).toEqual(READING_A)
   })
 
-  it('dispatches an alert envelope into the alerts buffer, newest first', () => {
+  it('delivers every alert directly to stable subscribers', () => {
     const { result } = renderHook(() => useLiveStream())
+    const subscriber = vi.fn()
+    const subscribe = result.current.subscribeToAlerts
+    const unsubscribe = subscribe(subscriber)
     act(() => currentSocket().triggerOpen())
 
     act(() => currentSocket().triggerMessage(JSON.stringify({ kind: 'alert', payload: ALERT_A })))
 
-    expect(result.current.alerts[0]).toEqual(ALERT_A)
+    expect(subscriber).toHaveBeenCalledWith(ALERT_A)
+    expect(result.current.subscribeToAlerts).toBe(subscribe)
+    unsubscribe()
+    act(() => currentSocket().triggerMessage(JSON.stringify({ kind: 'alert', payload: { ...ALERT_A, sequence: 2 } })))
+    expect(subscriber).toHaveBeenCalledTimes(1)
   })
 
   it('ignores a malformed JSON message without changing state', () => {
@@ -90,7 +98,6 @@ describe('useLiveStream', () => {
     act(() => currentSocket().triggerMessage('{not json'))
 
     expect(result.current.latestReadings).toEqual({})
-    expect(result.current.alerts).toEqual([])
     expect(result.current.connectionState).toBe('connected')
   })
 
@@ -116,7 +123,6 @@ describe('useLiveStream', () => {
     )
 
     expect(result.current.latestReadings).toEqual({})
-    expect(result.current.alerts).toEqual([])
   })
 
   it('moves to reconnecting on an unexpected close', () => {
@@ -138,16 +144,6 @@ describe('useLiveStream', () => {
     act(() => currentSocket().triggerClose())
 
     expect(result.current.latestReadings).toEqual({})
-  })
-
-  it('clears the live alerts buffer on an unexpected close', () => {
-    const { result } = renderHook(() => useLiveStream())
-    act(() => currentSocket().triggerOpen())
-    act(() => currentSocket().triggerMessage(JSON.stringify({ kind: 'alert', payload: ALERT_A })))
-
-    act(() => currentSocket().triggerClose())
-
-    expect(result.current.alerts).toEqual([])
   })
 
   it('reconnects using deterministic 1/2/4/8/10 second backoff, capped', () => {
@@ -326,8 +322,10 @@ describe('useLiveStream', () => {
     expect(result.current.latestReadings['rack-a1::intake_temp']).toEqual(READING_A)
 
     // A stale message from the superseded A must be ignored too.
+    const subscriber = vi.fn()
+    result.current.subscribeToAlerts(subscriber)
     act(() => socketA.triggerMessage(JSON.stringify({ kind: 'alert', payload: ALERT_A })))
-    expect(result.current.alerts).toEqual([])
+    expect(subscriber).not.toHaveBeenCalled()
 
     unmount()
     expect(socketB.closeRequested).toBe(true)
