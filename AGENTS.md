@@ -10,7 +10,10 @@ Docker Compose behavior unless an issue explicitly changes it.
 Current application components:
 
 - `backend/`: Java/Javalin backend exposing REST, WebSocket, and health endpoints.
-- `frontend/`: React/Vite frontend served by Nginx.
+  Implements a seeded, read-only device registry; device/channel-scoped readings;
+  history API; and threshold alerting with firing/resolved state persistence.
+- `frontend/`: React/Vite frontend served by Nginx. Multi-view dashboard for
+  monitoring devices, readings, and alerts.
 - `simulators/`: Java sensor data simulator writing directly to MongoDB.
 - MongoDB 7 runs as a single-node replica set.
 - MongoDB Change Streams are part of the live-data architecture and require
