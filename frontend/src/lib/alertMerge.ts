@@ -63,8 +63,13 @@ export function selectActiveAlerts(store: AlertStore): AlertEvent[] {
     .filter((alert) => alert.state === 'firing')
 }
 
-export function selectRecentAlerts(store: AlertStore, limit: number): AlertEvent[] {
+export function selectRecentAlerts(
+  store: AlertStore,
+  limit: number,
+  matches: (alert: AlertEvent) => boolean = () => true,
+): AlertEvent[] {
   return store.order
     .map((id) => store.byId[id])
+    .filter(matches)
     .slice(0, limit)
 }

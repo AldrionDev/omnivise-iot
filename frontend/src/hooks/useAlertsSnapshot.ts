@@ -9,7 +9,7 @@ import {
   type AlertStore,
 } from '../lib/alertMerge'
 import { fetchAlertsSnapshot } from '../lib/api'
-import type { AlertEvent } from '../types/domain'
+import type { AlertEvent, AlertSeverity, AlertState } from '../types/domain'
 
 export type AlertsSnapshotState =
   | { status: 'loading' }
@@ -17,6 +17,12 @@ export type AlertsSnapshotState =
   | { status: 'loaded'; items: AlertEvent[] }
 
 export type AlertsSnapshotKind = 'active' | 'recent'
+
+export interface AlertSnapshotFilters {
+  state?: AlertState
+  severity?: AlertSeverity
+  deviceId?: string
+}
 
 const MAX_RETAINED_ALERT_IDS = 1000
 
@@ -48,8 +54,9 @@ export function useAlertsSnapshot(
   limit = 20,
   deviceId?: string,
   refreshToken = 0,
+  filters: AlertSnapshotFilters = {},
 ): AlertsSnapshotState {
-  const scope = `${kind}:${limit}:${deviceId ?? '*'}:${path}`
+  const scope = `${kind}:${limit}:${deviceId ?? '*'}:${filters.state ?? '*'}:${filters.severity ?? '*'}:${filters.deviceId ?? '*'}:${path}`
   const [state, setState] = useState<InternalState>({ scope, status: 'loading' })
   const [compactionToken, setCompactionToken] = useState(0)
   const resyncToken = useReconnectResync()
@@ -150,6 +157,16 @@ export function useAlertsSnapshot(
   if (state.status !== 'loaded') return { status: state.status }
   return {
     status: 'loaded',
-    items: kind === 'active' ? selectActiveAlerts(state.store) : selectRecentAlerts(state.store, limit),
+    items: kind === 'active'
+      ? selectActiveAlerts(state.store).filter((alert) => matchesFilters(alert, filters))
+      : selectRecentAlerts(state.store, limit, (alert) => matchesFilters(alert, filters)),
   }
+}
+
+function matchesFilters(alert: AlertEvent, filters: AlertSnapshotFilters): boolean {
+  return (
+    (!filters.state || alert.state === filters.state) &&
+    (!filters.severity || alert.severity === filters.severity) &&
+    (!filters.deviceId || alert.deviceId === filters.deviceId)
+  )
 }

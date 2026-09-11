@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Badge, type BadgeVariant } from '../components/Badge'
 import { EmptyState } from '../components/EmptyState'
 import { Select } from '../components/Select'
-import { useAlertsSnapshot } from '../hooks/useAlertsSnapshot'
+import { useAlertsSnapshot, type AlertSnapshotFilters } from '../hooks/useAlertsSnapshot'
 import { useClockTick } from '../hooks/useClockTick'
 import { fetchJson } from '../lib/api'
 import { formatRelativeTime } from '../lib/relativeTime'
@@ -10,9 +10,6 @@ import type { AlertSeverity, AlertState, Device } from '../types/domain'
 
 const ALL_FILTER = 'all'
 const CLOCK_TICK_MS = 30_000
-// Mirrors the backend's AlertQuery.MAX_LIMIT (issue #73/#89): the largest
-// snapshot the API allows, so the client-side filters below see the fullest
-// picture the contract permits in one request.
 const ALERTS_LIMIT = 500
 
 type DevicesState =
@@ -30,12 +27,28 @@ function deviceLabel(deviceId: string, devices: Device[]): string {
 }
 
 export function AlertsPage() {
-  const alertsState = useAlertsSnapshot(`/alerts?limit=${ALERTS_LIMIT}`, 'recent', ALERTS_LIMIT)
   const [devicesState, setDevicesState] = useState<DevicesState>({ status: 'loading' })
   const [stateFilter, setStateFilter] = useState<typeof ALL_FILTER | AlertState>(ALL_FILTER)
   const [severityFilter, setSeverityFilter] = useState<typeof ALL_FILTER | AlertSeverity>(ALL_FILTER)
   const [deviceFilter, setDeviceFilter] = useState(ALL_FILTER)
   const now = useClockTick(CLOCK_TICK_MS)
+  const alertFilters: AlertSnapshotFilters = {
+    ...(stateFilter === ALL_FILTER ? {} : { state: stateFilter }),
+    ...(severityFilter === ALL_FILTER ? {} : { severity: severityFilter }),
+    ...(deviceFilter === ALL_FILTER ? {} : { deviceId: deviceFilter }),
+  }
+  const alertQuery = new URLSearchParams({ limit: String(ALERTS_LIMIT) })
+  if (alertFilters.state) alertQuery.set('state', alertFilters.state)
+  if (alertFilters.severity) alertQuery.set('severity', alertFilters.severity)
+  if (alertFilters.deviceId) alertQuery.set('deviceId', alertFilters.deviceId)
+  const alertsState = useAlertsSnapshot(
+    `/alerts?${alertQuery.toString()}`,
+    'recent',
+    ALERTS_LIMIT,
+    undefined,
+    0,
+    alertFilters,
+  )
 
   useEffect(() => {
     let current = true
@@ -52,36 +65,7 @@ export function AlertsPage() {
   const devices = useMemo(() => (devicesState.status === 'loaded' ? devicesState.devices : []), [devicesState])
   const deviceOptions = useMemo(() => [...devices].sort((a, b) => a.name.localeCompare(b.name)), [devices])
 
-  const rows = useMemo(() => {
-    if (alertsState.status !== 'loaded') {
-      return []
-    }
-    // Newest-first ordering comes from the backend and is preserved by the
-    // #75 alertMerge helpers (see useAlertsSnapshot) -- filtering below never
-    // re-sorts.
-    return alertsState.items.filter((alert) => {
-      if (stateFilter !== ALL_FILTER && alert.state !== stateFilter) {
-        return false
-      }
-      if (severityFilter !== ALL_FILTER && alert.severity !== severityFilter) {
-        return false
-      }
-      if (deviceFilter !== ALL_FILTER && alert.deviceId !== deviceFilter) {
-        return false
-      }
-      return true
-    })
-  }, [alertsState, stateFilter, severityFilter, deviceFilter])
-
-  if (alertsState.status === 'loading') {
-    return <p className="text-sm text-muted">Loading alerts…</p>
-  }
-
-  if (alertsState.status === 'error') {
-    return (
-      <EmptyState title="Couldn't load alerts" description="Something went wrong while loading alerts." />
-    )
-  }
+  const rows = useMemo(() => (alertsState.status === 'loaded' ? alertsState.items : []), [alertsState])
 
   return (
     <div className="flex flex-col gap-md">
@@ -117,7 +101,11 @@ export function AlertsPage() {
         />
       </div>
 
-      {rows.length === 0 ? (
+      {alertsState.status === 'loading' ? (
+        <p className="text-sm text-muted">Loading alerts…</p>
+      ) : alertsState.status === 'error' ? (
+        <EmptyState title="Couldn't load alerts" description="Something went wrong while loading alerts." />
+      ) : rows.length === 0 ? (
         <EmptyState title="No matching alerts" description="No alerts match the current filters." />
       ) : (
         <ul className="flex flex-col gap-xs">
