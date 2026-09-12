@@ -122,6 +122,11 @@ describe('DevicesPage', () => {
     renderPage()
     expect(await screen.findByText('Rack A1')).toBeTruthy()
     expect(screen.getByText('UPS 1')).toBeTruthy()
+
+    const deviceLink = screen.getByText('Rack A1').closest('a') as HTMLAnchorElement
+    const textBlock = deviceLink.querySelector('div') as HTMLElement
+    expect(textBlock.className).toContain('flex-col')
+    expect(textBlock.children).toHaveLength(2)
   })
 })
 

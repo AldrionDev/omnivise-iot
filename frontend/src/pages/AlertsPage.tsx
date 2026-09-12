@@ -71,6 +71,7 @@ export function AlertsPage() {
     <div className="flex flex-col gap-md">
       <div className="flex flex-wrap gap-md">
         <Select
+          className="w-full sm:w-auto"
           label="State"
           value={stateFilter}
           onChange={(value) => setStateFilter(value as typeof ALL_FILTER | AlertState)}
@@ -81,6 +82,7 @@ export function AlertsPage() {
           ]}
         />
         <Select
+          className="w-full sm:w-auto"
           label="Severity"
           value={severityFilter}
           onChange={(value) => setSeverityFilter(value as typeof ALL_FILTER | AlertSeverity)}
@@ -91,6 +93,7 @@ export function AlertsPage() {
           ]}
         />
         <Select
+          className="w-full sm:w-auto"
           label="Device"
           value={deviceFilter}
           onChange={setDeviceFilter}
@@ -112,11 +115,11 @@ export function AlertsPage() {
           {rows.map((alert) => (
             <li
               key={alert.id}
-              className={`flex items-center justify-between gap-md rounded-md border border-border bg-surface p-sm ${
+          className={`flex min-w-0 items-center justify-between gap-md rounded-md border border-border bg-surface p-sm ${
                 alert.state === 'resolved' ? 'opacity-60' : ''
               }`}
             >
-              <div className="flex flex-col">
+              <div className="min-w-0 flex flex-1 flex-col break-words">
                 <span className="text-sm text-foreground">
                   {deviceLabel(alert.deviceId, devices)} · {alert.channel} · {alert.ruleId}
                 </span>

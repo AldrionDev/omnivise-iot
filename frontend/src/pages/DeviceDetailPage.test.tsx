@@ -199,6 +199,30 @@ describe('DeviceDetailPage', () => {
     expect(screen.getByText('Server Room / Rack A1')).toBeTruthy()
   })
 
+  it('wraps long unbroken header labels for narrow layouts', async () => {
+    const longLabelDevice: Device = {
+      ...RACK_A1,
+      name: 'rack-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      kind: 'rack-kind-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      location: 'server-room-cccccccccccccccccccccccccccccccc',
+    }
+    mockFetch({ devices: { 'rack-a1': longLabelDevice } })
+    renderDetail()
+
+    const heading = await screen.findByRole('heading', { name: longLabelDevice.name })
+    const header = heading.closest('header') as HTMLElement
+    const info = heading.parentElement as HTMLElement
+    const metadata = info.querySelector('span.flex') as HTMLElement
+
+    expect(heading.className).toContain('break-words')
+    expect(info.className).toContain('min-w-0')
+    expect(info.className).toContain('flex-1')
+    expect(metadata.className).toContain('min-w-0')
+    expect(metadata.className).toContain('flex-wrap')
+    expect(metadata.textContent).toContain(longLabelDevice.location)
+    expect(header).toBeTruthy()
+  })
+
   it('shows a not-found state for an unknown device', async () => {
     mockFetch({ devices: {} })
     renderDetail('unknown-device')
@@ -446,6 +470,11 @@ describe('DeviceDetailPage recent alerts', () => {
 
     expect(await screen.findByText('intake_temp · firing')).toBeTruthy()
     expect(screen.getByText('critical')).toBeTruthy()
+
+    const alertRow = screen.getByText('intake_temp · firing').closest('li') as HTMLLIElement
+    const textBlock = alertRow.querySelector('div') as HTMLElement
+    expect(textBlock.className).toContain('flex-col')
+    expect(textBlock.children).toHaveLength(2)
   })
 })
 

@@ -26,11 +26,11 @@ function numericReadingValue(reading: Reading | undefined): number | null {
 /**
  * Combines the live reading at `${deviceId}::${channel}` across a set of
  * contributing devices (from {@link LiveStreamContext.latestReadings}), e.g.
- * max rack exhaust temperature across every rack, or total power draw summed
- * across every power-reporting device. A door_contact-style string reading is
- * not numeric and is ignored. `null` when none of the contributing keys have
- * a live reading yet -- callers render this as an explicit loading/empty
- * state rather than a misleading zero.
+ * max rack exhaust temperature across every rack, or a room-level power draw
+ * from one aggregate PDU. A door_contact-style string reading is not numeric
+ * and is ignored. `null` when none of the contributing keys have a live
+ * reading yet -- callers render this as an explicit loading/empty state rather
+ * than a misleading zero.
  */
 export function aggregateLatestValue(
   deviceIds: string[],

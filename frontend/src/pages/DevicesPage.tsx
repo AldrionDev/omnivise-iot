@@ -113,6 +113,7 @@ export function DevicesPage() {
     <div className="flex flex-col gap-md">
       <div className="flex flex-wrap gap-md">
         <Select
+          className="w-full sm:w-auto"
           label="Kind"
           value={kind}
           onChange={setKind}
@@ -122,6 +123,7 @@ export function DevicesPage() {
           ]}
         />
         <Select
+          className="w-full sm:w-auto"
           label="Location"
           value={location}
           onChange={setLocation}
@@ -131,6 +133,7 @@ export function DevicesPage() {
           ]}
         />
         <Select
+          className="w-full sm:w-auto"
           label="Status"
           value={status}
           onChange={setStatus}
@@ -154,13 +157,13 @@ export function DevicesPage() {
             <li key={device.deviceId}>
               <Link
                 to={`/devices/${device.deviceId}`}
-                className="flex items-center justify-between gap-md rounded-md border border-border bg-surface p-md hover:bg-surface-raised"
+                className="flex min-w-0 items-center justify-between gap-md rounded-md border border-border bg-surface p-md hover:bg-surface-raised"
               >
-                <div className="flex flex-col">
-                  <span className="text-base text-foreground">{device.name}</span>
-                  <span className="text-sm text-muted">{device.location}</span>
+                <div className="min-w-0 flex flex-1 flex-col break-words">
+                  <span className="break-words text-base text-foreground">{device.name}</span>
+                  <span className="break-words text-sm text-muted">{device.location}</span>
                 </div>
-                <div className="flex items-center gap-md">
+                <div className="flex shrink-0 flex-wrap items-center justify-end gap-sm">
                   <span className="text-sm text-muted">{device.kind}</span>
                   <Badge variant={STATUS_BADGE_VARIANT[deviceStatus]}>{deviceStatus}</Badge>
                 </div>
