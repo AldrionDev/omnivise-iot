@@ -7,7 +7,7 @@ services:
     ports:
       - "${MONGO_PORT:-27017}:27017"
     environment:
-      MONGO_INITDB_DATABASE: ${MONGO_INITDB_DATABASE:-omnivise_iot}
+      MONGO_INITDB_DATABASE: ${MONGO_INITDB_DATABASE-omnivise_iot}
     volumes:
       - mongodb_data:/data/db
       - ./mongo-replica-init.js:/docker-entrypoint-initdb.d/mongo-replica-init.js:ro
@@ -15,6 +15,7 @@ services:
       - omnivise-network
     healthcheck:
       test: |
+        [ -n "$(printf '%s' "$$MONGO_INITDB_DATABASE" | tr -d '[:space:]')" ] &&
         mongosh --eval "
           try {
             var status = rs.status();
@@ -52,6 +53,8 @@ services:
       - --quiet
       - --file
       - /seed/mongo-init.js
+    environment:
+      MONGO_INITDB_DATABASE: ${MONGO_INITDB_DATABASE-omnivise_iot}
     volumes:
       - ./mongo-init.js:/seed/mongo-init.js:ro
     depends_on:
@@ -88,7 +91,7 @@ services:
       MONGO_URI: mongodb://mongodb:27017/?replicaSet=rs0
       MONGO_HOST: mongodb
       MONGO_PORT: 27017
-      MONGO_DATABASE: ${MONGO_INITDB_DATABASE:-omnivise_iot}
+      MONGO_DATABASE: ${MONGO_INITDB_DATABASE-omnivise_iot}
       BACKEND_PORT: 8080
       # Optional outbound alert webhook (issue #73). Unset/blank = disabled.
       ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
@@ -123,7 +126,7 @@ services:
     restart: always
     environment:
       MONGO_URI: mongodb://mongodb:27017/?replicaSet=rs0
-      MONGO_DATABASE: ${MONGO_INITDB_DATABASE:-omnivise_iot}
+      MONGO_DATABASE: ${MONGO_INITDB_DATABASE-omnivise_iot}
       MONGO_COLLECTION: sensor_readings
       INTERVAL_SECONDS: ${SIMULATOR_INTERVAL:-5}
       ANOMALY_MODE: ${SIMULATOR_ANOMALY_MODE:-false}

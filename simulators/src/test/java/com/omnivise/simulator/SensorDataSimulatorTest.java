@@ -1,6 +1,7 @@
 package com.omnivise.simulator;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayList;
@@ -23,6 +24,20 @@ import com.omnivise.simulator.SimulatorEngine.Reading;
 class SensorDataSimulatorTest {
 
     private static final long START = 1_000_000L;
+
+    @Test
+    void databaseNameDefaultsOnlyWhenMissing() {
+        assertEquals("omnivise_iot", SensorDataSimulator.resolveDatabaseName(null));
+        assertEquals("omnivise_iot_test", SensorDataSimulator.resolveDatabaseName("omnivise_iot_test"));
+    }
+
+    @Test
+    void databaseNameRejectsBlankValues() {
+        assertThrows(IllegalArgumentException.class,
+                () -> SensorDataSimulator.resolveDatabaseName(""));
+        assertThrows(IllegalArgumentException.class,
+                () -> SensorDataSimulator.resolveDatabaseName("   "));
+    }
 
     /** Mutable fake wall clock; the fake sleeper advances it. */
     private static final class FakeClock implements LongSupplier {

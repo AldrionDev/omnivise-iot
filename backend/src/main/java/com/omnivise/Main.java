@@ -51,7 +51,7 @@ public class Main {
                 mongoUser,
                 mongoPassword);
 
-        String mongoDatabase = getEnvVar("MONGO_DATABASE", "omnivise_iot");
+        String mongoDatabase = resolveMongoDatabase(getEnvVarPreservingBlank("MONGO_DATABASE"));
 
         // Port setting from .env or default to 8080
         int port = Integer.parseInt(getEnvVar("BACKEND_PORT", "8080"));
@@ -324,6 +324,21 @@ public class Main {
 
         // If still not found, use default value
         return (value != null && !value.isEmpty()) ? value : defaultValue;
+    }
+
+    private static String getEnvVarPreservingBlank(String key) {
+        String value = dotenv.get(key);
+        return value != null ? value : System.getenv(key);
+    }
+
+    static String resolveMongoDatabase(String value) {
+        if (value == null) {
+            return "omnivise_iot";
+        }
+        if (value.isBlank()) {
+            throw new IllegalArgumentException("MONGO_DATABASE must select an application database");
+        }
+        return value;
     }
 
     /**

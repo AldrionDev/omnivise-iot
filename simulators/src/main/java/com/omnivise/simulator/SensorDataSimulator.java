@@ -38,7 +38,7 @@ public class SensorDataSimulator {
     private static final Map<String, String> ENV = System.getenv();
 
     private static final String MONGO_URI = env("MONGO_URI", "mongodb://localhost:27017/?replicaSet=rs0");
-    private static final String DATABASE_NAME = env("MONGO_DATABASE", "omnivise_iot");
+    private static final String DATABASE_NAME = resolveDatabaseName(ENV.get("MONGO_DATABASE"));
     private static final String COLLECTION_NAME = env("MONGO_COLLECTION", "sensor_readings");
 
     /** Sleep seam so the tick loop can be tested without real waits. */
@@ -256,6 +256,16 @@ public class SensorDataSimulator {
     private static String env(String key, String fallback) {
         String value = ENV.get(key);
         return value == null || value.isBlank() ? fallback : value;
+    }
+
+    static String resolveDatabaseName(String value) {
+        if (value == null) {
+            return "omnivise_iot";
+        }
+        if (value.isBlank()) {
+            throw new IllegalArgumentException("MONGO_DATABASE must select an application database");
+        }
+        return value;
     }
 
     private static int envInt(String key, int fallback) {
