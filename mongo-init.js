@@ -17,8 +17,6 @@
 // silently accepts a half-initialised state. A clean re-cutover is an explicit
 // operator action: `docker compose down -v`.
 
-const DB_NAME = "omnivise_iot";
-
 // The registry the seed produces. Existing-state validation requires exactly
 // these ids — no more, no fewer.
 const EXPECTED_DEVICE_IDS = ["rack-a1", "rack-a2", "ups-1", "pdu-a1", "crac-1"];
@@ -116,8 +114,13 @@ if (!db.hello().isWritablePrimary) {
   quit(1);
 }
 
-db = db.getSiblingDB(DB_NAME);
-print("📦 Database: " + DB_NAME);
+const databaseName = process.env.MONGO_INITDB_DATABASE;
+if (!databaseName || databaseName.trim().length === 0) {
+  print("❌ MONGO_INITDB_DATABASE must select an application database");
+  quit(1);
+}
+db = db.getSiblingDB(databaseName);
+print("📦 Database: " + db.getName());
 
 // ---------------------------------------------------------------------------
 // Seed data — single source for both the fresh seed and the completeness check.
@@ -290,18 +293,15 @@ function completenessProblems() {
   //    seeded rows, not a "no other shape allowed" check: until #71 the
   //    simulator legitimately keeps writing old-schema documents into the same
   //    collection, and a normal restart must still validate as complete.
-  const seededReadings = db.sensor_readings.countDocuments({
-    deviceId: { $exists: true },
-    channel: { $exists: true },
-    timestamp: { $type: "date" },
+  readings.forEach((expected) => {
+    const matches = db.sensor_readings.countDocuments(expected);
+    if (matches !== 1) {
+      problems.push(
+        "sensor_readings: expected exactly one seeded reading " +
+          EJSON.stringify(expected) + ", found " + matches,
+      );
+    }
   });
-  if (seededReadings < readings.length) {
-    problems.push(
-      "sensor_readings: expected at least " + readings.length +
-        " new-schema readings with a BSON Date timestamp, found " + seededReadings +
-        " (the #70 seed is missing or incomplete)",
-    );
-  }
 
   // 3. sensor_readings: required indexes exist.
   for (const wanted of REQUIRED_READING_INDEXES) {

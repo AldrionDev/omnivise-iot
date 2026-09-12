@@ -1,0 +1,13 @@
+services:
+  mongodb:
+    container_name: ${COMPOSE_PROJECT_NAME}-mongodb
+    ports: !reset []
+  mongo-seed:
+    container_name: ${COMPOSE_PROJECT_NAME}-mongo-seed
+  backend:
+    container_name: ${COMPOSE_PROJECT_NAME}-backend
+    image: ${ISSUE98_IMAGE_PREFIX}-backend:latest
+    ports: !reset []
+  sensor-simulator:
+    container_name: ${COMPOSE_PROJECT_NAME}-sensor-simulator
+    image: ${ISSUE98_IMAGE_PREFIX}-sensor-simulator:latest
