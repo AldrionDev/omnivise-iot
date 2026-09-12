@@ -14,7 +14,6 @@ import {
   devicesWithChannel,
   maxOf,
   mergeHistorySeries,
-  sumOf,
   type SparklinePoint,
 } from '../lib/metrics'
 import { resolveHistoryWindow } from '../lib/range'
@@ -29,6 +28,7 @@ const CLOCK_TICK_MS = 30_000
 // Approved topology (mongo-init.js): exact seeded channel names, not guessed.
 const EXHAUST_TEMP_CHANNEL = 'exhaust_temp'
 const POWER_DRAW_CHANNEL = 'power_draw'
+const PDU_DEVICE_ID = 'pdu-a1'
 const UPS_DEVICE_ID = 'ups-1'
 const BATTERY_PCT_CHANNEL = 'battery_pct'
 
@@ -104,8 +104,12 @@ export function OverviewPage() {
     () => devicesWithChannel(devices, EXHAUST_TEMP_CHANNEL).map((d) => d.deviceId),
     [devices],
   )
+  // PDU power is the room-level aggregate. Rack power readings are deliberately
+  // excluded so the headline does not count the same load twice.
   const powerDeviceIds = useMemo(
-    () => devicesWithChannel(devices, POWER_DRAW_CHANNEL).map((d) => d.deviceId),
+    () => devices.some((device) => device.deviceId === PDU_DEVICE_ID && device.channels.some((c) => c.channel === POWER_DRAW_CHANNEL))
+      ? [PDU_DEVICE_ID]
+      : [],
     [devices],
   )
 
@@ -125,7 +129,7 @@ export function OverviewPage() {
         unit: 'W',
         deviceIds: powerDeviceIds,
         channel: POWER_DRAW_CHANNEL,
-        combine: sumOf,
+        combine: (values) => values[0],
       },
       {
         key: 'battery',
@@ -208,7 +212,7 @@ export function OverviewPage() {
   }
 
   return (
-    <div className="flex flex-col gap-lg">
+    <div className="flex min-w-0 flex-col gap-lg">
       <section aria-label="Status roll-up" className="grid grid-cols-1 gap-md sm:grid-cols-3">
         {(['ok', 'degraded', 'critical'] as const).map((status) => (
           <Card key={status} className="flex flex-col gap-xs">
@@ -224,8 +228,8 @@ export function OverviewPage() {
           const history = metricHistory[metric.key] ?? { status: 'loading' as const, points: [] }
           return (
             <Card key={metric.key} className="flex flex-col gap-sm">
-              <span className="text-sm text-muted">{metric.label}</span>
-              <span className="text-lg text-foreground">{formatMetricValue(currentValue, metric.unit)}</span>
+              <span className="break-words text-sm text-muted">{metric.label}</span>
+              <span className="break-words text-lg text-foreground">{formatMetricValue(currentValue, metric.unit)}</span>
               <Sparkline status={history.status} points={history.points} />
             </Card>
           )
@@ -246,9 +250,9 @@ export function OverviewPage() {
             {topAlerts.map((alert) => (
               <li
                 key={alert.id}
-                className="flex items-center justify-between gap-md rounded-md border border-border bg-surface p-sm"
+                className="flex min-w-0 items-center justify-between gap-md rounded-md border border-border bg-surface p-sm"
               >
-                <div className="flex flex-col">
+                <div className="min-w-0 flex flex-1 flex-col break-words">
                   <span className="text-sm text-foreground">
                     {alert.deviceId} · {alert.channel}
                   </span>
@@ -275,11 +279,11 @@ export function OverviewPage() {
               return (
                 <Link key={device.deviceId} to={`/devices/${device.deviceId}`}>
                   <Card className="flex flex-col gap-xs hover:bg-surface-raised">
-                    <div className="flex items-center justify-between">
-                      <span className="text-base text-foreground">{device.name}</span>
+                      <div className="flex min-w-0 items-center justify-between gap-sm">
+                      <span className="min-w-0 break-words text-base text-foreground">{device.name}</span>
                       <Badge variant={STATUS_BADGE_VARIANT[status]}>{status}</Badge>
                     </div>
-                    <span className="text-sm text-muted">{device.location}</span>
+                    <span className="break-words text-sm text-muted">{device.location}</span>
                     <span className="text-sm text-muted">{device.kind}</span>
                   </Card>
                 </Link>

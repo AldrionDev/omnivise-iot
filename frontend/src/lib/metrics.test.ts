@@ -57,14 +57,15 @@ describe('aggregateLatestValue', () => {
     expect(result).toBe(33.1)
   })
 
-  it('sums across contributing devices for a power-draw style metric', () => {
+  it('uses only the aggregate PDU for the room power metric', () => {
     const latest: Record<string, Reading> = {
       'rack-a1::power_draw': reading('rack-a1', 'power_draw', 1180),
       'rack-a2::power_draw': reading('rack-a2', 'power_draw', 1340),
       'pdu-a1::power_draw': reading('pdu-a1', 'power_draw', 2360),
     }
-    const result = aggregateLatestValue(['rack-a1', 'rack-a2', 'pdu-a1'], 'power_draw', latest, sumOf)
-    expect(result).toBe(4880)
+    const result = aggregateLatestValue(['pdu-a1'], 'power_draw', latest, sumOf)
+    expect(result).toBe(2360)
+    expect(result).not.toBe(sumOf([1180, 1340, 2360]))
   })
 
   it('returns null when none of the contributing keys have a live reading yet', () => {

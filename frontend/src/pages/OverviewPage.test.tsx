@@ -190,6 +190,10 @@ describe('OverviewPage active alerts widget', () => {
       expect.stringContaining('rack-a2'),
       expect.stringContaining('rack-a1'),
     ])
+
+    const textBlock = rows[0].querySelector('div') as HTMLElement
+    expect(textBlock.className).toContain('flex-col')
+    expect(textBlock.children).toHaveLength(2)
   })
 
   it('shows an explicit empty state when there are no active alerts', async () => {
@@ -273,7 +277,7 @@ describe('OverviewPage reconnect resync', () => {
 })
 
 describe('OverviewPage headline metrics', () => {
-  it('aggregates the current value across contributing devices via LiveStreamContext', async () => {
+  it('uses the aggregate PDU reading for total power instead of double-counting rack readings', async () => {
     mockFetch({ devices: [RACK_A1, RACK_A2, PDU_A1, UPS_1] })
     renderPage()
     await screen.findByText('Max rack exhaust temperature')
@@ -319,8 +323,16 @@ describe('OverviewPage headline metrics', () => {
     })
 
     expect(await screen.findByText('33.1 °C')).toBeTruthy()
-    expect(await screen.findByText('4880 W')).toBeTruthy()
+    expect(await screen.findByText('2360 W')).toBeTruthy()
+    expect(screen.queryByText('4880 W')).toBeNull()
     expect(await screen.findByText('97 %')).toBeTruthy()
+
+    const powerHistoryRequests = vi
+      .mocked(fetch)
+      .mock.calls.map(([input]) => new URL(String(input), 'http://test.local').searchParams)
+      .filter((params) => params.get('channel') === 'power_draw')
+    expect(powerHistoryRequests).toHaveLength(1)
+    expect(powerHistoryRequests[0].get('deviceId')).toBe('pdu-a1')
   })
 
   it('shows an explicit "no live value" state before any reading arrives', async () => {

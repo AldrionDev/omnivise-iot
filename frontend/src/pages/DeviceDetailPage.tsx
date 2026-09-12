@@ -62,10 +62,10 @@ interface ChannelCardProps {
 
 function ChannelCard({ channel, liveValue, children }: ChannelCardProps) {
   return (
-    <div className="flex flex-col gap-sm rounded-md border border-border bg-surface p-md">
-      <div className="flex items-center justify-between">
-        <span className="text-base text-foreground">{channel}</span>
-        <span className="text-sm text-muted">{liveValue}</span>
+    <div className="flex min-w-0 flex-col gap-sm rounded-md border border-border bg-surface p-md">
+      <div className="flex min-w-0 flex-wrap items-center justify-between gap-xs">
+        <span className="break-words text-base text-foreground">{channel}</span>
+        <span className="break-words text-sm text-muted">{liveValue}</span>
       </div>
       {children}
     </div>
@@ -218,18 +218,18 @@ export function DeviceDetailPage() {
   return (
     <div className="flex flex-col gap-lg">
       <header className="flex flex-wrap items-center justify-between gap-md">
-        <div className="flex flex-col">
-          <h1 className="text-lg text-foreground">{device.name}</h1>
-          <span className="flex gap-xs text-sm text-muted">
-            <span>{device.kind}</span>
+        <div className="min-w-0 flex flex-1 flex-col">
+          <h1 className="break-words text-lg text-foreground">{device.name}</h1>
+          <span className="flex min-w-0 flex-wrap gap-xs break-words text-sm text-muted">
+            <span className="break-words">{device.kind}</span>
             <span aria-hidden="true">·</span>
-            <span>{device.location}</span>
+            <span className="break-words">{device.location}</span>
           </span>
         </div>
         {status && <Badge variant={STATUS_BADGE_VARIANT[status]}>{status}</Badge>}
       </header>
 
-      <div className="flex gap-xs" role="group" aria-label="Range">
+      <div className="flex flex-wrap gap-xs" role="group" aria-label="Range">
         {HISTORY_RANGES.map((r) => (
           <Button
             key={r}
@@ -283,9 +283,9 @@ export function DeviceDetailPage() {
             {rules.items.map((rule) => (
               <li
                 key={rule.ruleId}
-                className="flex items-center justify-between gap-md rounded-md border border-border bg-surface p-sm"
+                className="flex min-w-0 items-center justify-between gap-md rounded-md border border-border bg-surface p-sm"
               >
-                <span className="text-sm text-foreground">
+                <span className="min-w-0 flex-1 break-words text-sm text-foreground">
                   {rule.ruleId} · {rule.match.channel} {rule.operator} {rule.threshold}
                 </span>
                 <Badge variant={SEVERITY_BADGE_VARIANT[rule.severity]}>{rule.severity}</Badge>
@@ -309,9 +309,9 @@ export function DeviceDetailPage() {
             {recentAlerts.items.map((alert) => (
               <li
                 key={alert.id}
-                className="flex items-center justify-between gap-md rounded-md border border-border bg-surface p-sm"
+                className="flex min-w-0 items-center justify-between gap-md rounded-md border border-border bg-surface p-sm"
               >
-                <div className="flex flex-col">
+                <div className="min-w-0 flex flex-1 flex-col break-words">
                   <span className="text-sm text-foreground">
                     {alert.channel} · {alert.state}
                   </span>

@@ -132,6 +132,10 @@ describe('AlertsPage initial rendering', () => {
 
     expect(await screen.findByText(/Rack A1.*exhaust_temp/)).toBeTruthy()
     expect(rows().getByText(/UPS 1.*battery_pct/)).toBeTruthy()
+
+    const textBlock = rows().getByText(/Rack A1.*exhaust_temp/).parentElement as HTMLElement
+    expect(textBlock.className).toContain('flex-col')
+    expect(textBlock.children).toHaveLength(2)
   })
 
   it('shows an explicit empty state when there are no alerts', async () => {

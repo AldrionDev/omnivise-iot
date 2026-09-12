@@ -40,6 +40,16 @@ describe('AppShell', () => {
     expect(screen.getByRole('link', { name: 'Alerts' })).toBeTruthy()
   })
 
+  it('uses a stacked, full-width navigation below the desktop sidebar breakpoint', () => {
+    renderShell('/')
+    const navigation = screen.getByRole('navigation', { name: 'Primary' })
+    expect(navigation.className).toContain('w-full')
+    expect(navigation.className).toContain('md:w-48')
+    expect(navigation.className).toContain('md:border-r')
+    expect(navigation.className).toContain('border-b')
+    expect(screen.getByRole('link', { name: 'Overview' }).className).toContain('flex-1')
+  })
+
   it('renders the routed child inside the shell via Outlet', () => {
     renderShell('/devices')
     expect(screen.getByText('devices content')).toBeTruthy()
