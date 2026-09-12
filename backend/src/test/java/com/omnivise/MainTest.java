@@ -1,6 +1,7 @@
 package com.omnivise;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import org.junit.jupiter.api.Test;
 
@@ -12,6 +13,18 @@ import org.junit.jupiter.api.Test;
  * authentication is only added when both a username and a password are present.
  */
 class MainTest {
+
+    @Test
+    void mongoDatabaseDefaultsOnlyWhenMissing() {
+        assertEquals("omnivise_iot", Main.resolveMongoDatabase(null));
+        assertEquals("omnivise_iot_test", Main.resolveMongoDatabase("omnivise_iot_test"));
+    }
+
+    @Test
+    void mongoDatabaseRejectsBlankValues() {
+        assertThrows(IllegalArgumentException.class, () -> Main.resolveMongoDatabase(""));
+        assertThrows(IllegalArgumentException.class, () -> Main.resolveMongoDatabase("   "));
+    }
 
     @Test
     void explicitMongoUriTakesPrecedenceOverLegacyFields() {
@@ -71,5 +84,21 @@ class MainTest {
                         "27019",
                         "legacy-user",
                         ""));
+    }
+
+    @Test
+    void clampLimitKeepsAnInRangeValueUnchanged() {
+        assertEquals(50, Main.clampLimit(50));
+    }
+
+    @Test
+    void clampLimitRaisesANonPositiveValueToOne() {
+        assertEquals(1, Main.clampLimit(0));
+        assertEquals(1, Main.clampLimit(-10));
+    }
+
+    @Test
+    void clampLimitCapsAnExcessiveValueAtFiveHundred() {
+        assertEquals(500, Main.clampLimit(10_000));
     }
 }

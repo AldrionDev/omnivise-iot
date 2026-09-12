@@ -56,13 +56,26 @@ public class WebSocketHandler {
     }
 
     public void broadcast(SensorReading reading) {
+        // Typed envelope: { "kind": "reading", "payload": { ... } }
+        sendToAll(ReadingMessage.of(reading), "SensorReading");
+    }
+
+    /**
+     * Broadcasts an alert state transition (issue #73) as
+     * {@code { "kind": "alert", "payload": { ...alert_event... } }} to every
+     * connected client. Same delivery semantics as {@link #broadcast(SensorReading)}.
+     */
+    public void broadcast(AlertMessage message) {
+        sendToAll(message, "AlertMessage");
+    }
+
+    private void sendToAll(Object envelope, String label) {
         if (clients.isEmpty()) {
             return;
         }
 
         try {
-            // Serialize SensorReading to JSON
-            String jsonMessage = objectMapper.writeValueAsString(reading);
+            String jsonMessage = objectMapper.writeValueAsString(envelope);
 
             clients.forEach((ctx, sessionId) -> {
                 try {
@@ -73,7 +86,7 @@ public class WebSocketHandler {
                 }
             });
         } catch (Exception e) {
-            System.err.println("⚠️ Failed to serialize SensorReading to JSON: " + e.getMessage());
+            System.err.println("⚠️ Failed to serialize " + label + " to JSON: " + e.getMessage());
             e.printStackTrace();
         }
     }

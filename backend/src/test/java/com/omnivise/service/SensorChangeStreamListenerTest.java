@@ -9,12 +9,15 @@ import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -55,6 +58,7 @@ class SensorChangeStreamListenerTest {
 
     private final MongoCollection<Document> collection = mock(MongoCollection.class);
     private final WebSocketHandler wsHandler = mock(WebSocketHandler.class);
+    private final AlertEvaluator alertEvaluator = mock(AlertEvaluator.class);
     private final List<Long> sleeps = new CopyOnWriteArrayList<>();
 
     private SensorChangeStreamListener listener;
@@ -93,10 +97,11 @@ class SensorChangeStreamListenerTest {
         verify(wsHandler, timeout(3_000)).broadcast(captor.capture());
 
         SensorReading delivered = captor.getValue();
-        assertEquals("sensor-001", delivered.sensorId());
-        assertEquals("temperature", delivered.type());
+        assertEquals("rack-a1", delivered.deviceId());
+        assertEquals("intake_temp", delivered.channel());
         assertEquals(25.5, delivered.value());
-        assertEquals("C", delivered.unit());
+        assertEquals("°C", delivered.unit());
+        assertEquals("2026-09-10T08:00:00Z", delivered.timestamp());
 
         verify(collection, atLeast(2)).watch();
         assertFalse(sleeps.isEmpty(), "a bounded wait must precede the reopen");
@@ -276,12 +281,71 @@ class SensorChangeStreamListenerTest {
     }
 
     // ------------------------------------------------------------------
+    // Alert evaluation on the hot path (issue #73)
+    // ------------------------------------------------------------------
+
+    @Test
+    void anInsertedReadingIsBroadcastAndThenEvaluatedForAlerts() {
+        CountDownLatch park = new CountDownLatch(1);
+
+        ChangeStreamDocument<Document> insertEvent = insertEvent(sampleDoc());
+        MongoChangeStreamCursor<ChangeStreamDocument<Document>> healthy = parkingCursor(park);
+        when(healthy.hasNext()).thenReturn(true).thenAnswer(inv -> awaitThenFalse(park));
+        when(healthy.next()).thenReturn(insertEvent);
+
+        ChangeStreamIterable<Document> iterable = iterableReturning(healthy);
+        when(collection.watch()).thenReturn(iterable);
+
+        listener = newListener(1_000, 30_000, recordingSleeper());
+        listener.start();
+
+        ArgumentCaptor<SensorReading> broadcast = ArgumentCaptor.forClass(SensorReading.class);
+        ArgumentCaptor<SensorReading> evaluated = ArgumentCaptor.forClass(SensorReading.class);
+        verify(wsHandler, timeout(3_000)).broadcast(broadcast.capture());
+        verify(alertEvaluator, timeout(3_000)).evaluate(evaluated.capture());
+
+        org.mockito.InOrder order = org.mockito.Mockito.inOrder(wsHandler, alertEvaluator);
+        order.verify(wsHandler).broadcast(any(SensorReading.class));
+        order.verify(alertEvaluator).evaluate(any(SensorReading.class));
+
+        assertEquals("rack-a1", evaluated.getValue().deviceId());
+        assertEquals("intake_temp", evaluated.getValue().channel());
+    }
+
+    @Test
+    void anEvaluatorFailureDoesNotDisturbBroadcastOrTheSupervisionBackoff() {
+        CountDownLatch park = new CountDownLatch(1);
+
+        ChangeStreamDocument<Document> insertEvent = insertEvent(sampleDoc());
+        MongoChangeStreamCursor<ChangeStreamDocument<Document>> healthy = parkingCursor(park);
+        when(healthy.hasNext()).thenReturn(true, true).thenAnswer(inv -> awaitThenFalse(park));
+        when(healthy.next()).thenReturn(insertEvent);
+
+        ChangeStreamIterable<Document> iterable = iterableReturning(healthy);
+        when(collection.watch()).thenReturn(iterable);
+
+        doThrow(new RuntimeException("alert store unavailable"))
+                .doNothing()
+                .when(alertEvaluator).evaluate(any(SensorReading.class));
+
+        listener = newListener(5, 20, recordingSleeper());
+        listener.start();
+
+        verify(wsHandler, timeout(3_000).times(2)).broadcast(any(SensorReading.class));
+        verify(alertEvaluator, timeout(3_000).times(2)).evaluate(any(SensorReading.class));
+
+        // The evaluator throwing is not a stream failure: no reopen, no backoff wait.
+        verify(collection, org.mockito.Mockito.after(300).times(1)).watch();
+        assertTrue(sleeps.isEmpty(), "an evaluator error must not trigger the reconnection backoff");
+    }
+
+    // ------------------------------------------------------------------
     // Helpers — each builds a fully-stubbed value; never call inside a
     // still-open when(...).thenReturn(...).
     // ------------------------------------------------------------------
 
     private SensorChangeStreamListener newListener(long baseMs, long maxMs, SensorChangeStreamListener.Sleeper sleeper) {
-        return new SensorChangeStreamListener(collection, wsHandler, baseMs, maxMs, sleeper);
+        return new SensorChangeStreamListener(collection, wsHandler, alertEvaluator, baseMs, maxMs, sleeper);
     }
 
     private SensorChangeStreamListener.Sleeper recordingSleeper() {
@@ -315,12 +379,11 @@ class SensorChangeStreamListenerTest {
     }
 
     private Document sampleDoc() {
-        return new Document("sensor_id", "sensor-001")
-                .append("type", "temperature")
+        return new Document("deviceId", "rack-a1")
+                .append("channel", "intake_temp")
                 .append("value", 25.5)
-                .append("unit", "C")
-                .append("location", "Office Room 1")
-                .append("timestamp", "2026-03-01T12:00:00Z");
+                .append("unit", "°C")
+                .append("timestamp", Date.from(Instant.parse("2026-09-10T08:00:00Z")));
     }
 
     private static boolean awaitThenFalse(CountDownLatch latch) {

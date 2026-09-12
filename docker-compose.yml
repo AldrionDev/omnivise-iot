@@ -7,15 +7,15 @@ services:
     ports:
       - "${MONGO_PORT:-27017}:27017"
     environment:
-      MONGO_INITDB_DATABASE: ${MONGO_INITDB_DATABASE:-omnivise_iot}
+      MONGO_INITDB_DATABASE: ${MONGO_INITDB_DATABASE-omnivise_iot}
     volumes:
       - mongodb_data:/data/db
-      - ./mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
       - ./mongo-replica-init.js:/docker-entrypoint-initdb.d/mongo-replica-init.js:ro
     networks:
       - omnivise-network
     healthcheck:
       test: |
+        [ -n "$(printf '%s' "$$MONGO_INITDB_DATABASE" | tr -d '[:space:]')" ] &&
         mongosh --eval "
           try {
             var status = rs.status();
@@ -37,6 +37,31 @@ services:
       timeout: 5s
       retries: 30
       start_period: 15s
+
+  # One-shot seeder: creates the read-only `devices` registry and the initial
+  # `sensor_readings` in the deviceId/channel shape. It runs only after the
+  # replica set has a writable primary (mongodb healthy); seeding during the
+  # mongod init phase is impossible because the replica set is not yet primary.
+  # Idempotent — skips a database that already has devices.
+  mongo-seed:
+    image: mongo:7.0
+    container_name: omnivise-mongo-seed
+    restart: "no"
+    command:
+      - mongosh
+      - mongodb://mongodb:27017/?replicaSet=rs0
+      - --quiet
+      - --file
+      - /seed/mongo-init.js
+    environment:
+      MONGO_INITDB_DATABASE: ${MONGO_INITDB_DATABASE-omnivise_iot}
+    volumes:
+      - ./mongo-init.js:/seed/mongo-init.js:ro
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - omnivise-network
 
   mongo-express:
     image: mongo-express:1.0
@@ -66,11 +91,15 @@ services:
       MONGO_URI: mongodb://mongodb:27017/?replicaSet=rs0
       MONGO_HOST: mongodb
       MONGO_PORT: 27017
-      MONGO_DATABASE: ${MONGO_INITDB_DATABASE:-omnivise_iot}
+      MONGO_DATABASE: ${MONGO_INITDB_DATABASE-omnivise_iot}
       BACKEND_PORT: 8080
+      # Optional outbound alert webhook (issue #73). Unset/blank = disabled.
+      ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
     depends_on:
       mongodb:
         condition: service_healthy
+      mongo-seed:
+        condition: service_completed_successfully
     networks:
       - omnivise-network
     healthcheck:
@@ -97,12 +126,19 @@ services:
     restart: always
     environment:
       MONGO_URI: mongodb://mongodb:27017/?replicaSet=rs0
-      MONGO_DATABASE: ${MONGO_INITDB_DATABASE:-omnivise_iot}
+      MONGO_DATABASE: ${MONGO_INITDB_DATABASE-omnivise_iot}
       MONGO_COLLECTION: sensor_readings
       INTERVAL_SECONDS: ${SIMULATOR_INTERVAL:-5}
+      ANOMALY_MODE: ${SIMULATOR_ANOMALY_MODE:-false}
+      ANOMALY_EVERY_TICKS: ${SIMULATOR_ANOMALY_EVERY_TICKS:-60}
+      ANOMALY_DURATION_TICKS: ${SIMULATOR_ANOMALY_DURATION_TICKS:-6}
+      SEED: ${SIMULATOR_SEED:-42}
+      START_TIME: ${SIMULATOR_START_TIME:-}
     depends_on:
       mongodb:
         condition: service_healthy
+      mongo-seed:
+        condition: service_completed_successfully
     networks:
       - omnivise-network
 

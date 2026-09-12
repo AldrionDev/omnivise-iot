@@ -6,92 +6,62 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import org.junit.jupiter.api.Test;
 
 /**
- * Unit tests for the SensorReading record.
- * Tests the immutability and accessor methods of the data model.
+ * Unit tests for the reshaped {@link SensorReading} record (issue #70).
+ *
+ * <p>A reading is keyed by {@code deviceId} + {@code channel}; {@code value} is
+ * an opaque {@link Object} (numeric or boolean); {@code timestamp} is an
+ * ISO-8601 string produced by the shared mapper from a BSON {@code Date}.
  */
 public class SensorReadingTest {
 
     @Test
-    void testSensorReadingCreation() {
-        // Given
-        String sensorId = "sensor-001";
-        String type = "temperature";
-        Object value = 25.5;
-        String unit = "C";
-        String location = "Office Room 1";
-        String timestamp = "2026-03-01T12:00:00Z";
+    void exposesEveryComponentThroughItsAccessor() {
+        Object value = 22.4;
 
-        // When
-        SensorReading reading = new SensorReading(sensorId, type, value, unit, location, timestamp);
-
-        // Then
-        assertEquals(sensorId, reading.sensorId());
-        assertEquals(type, reading.type());
-        assertEquals(value, reading.value());
-        assertEquals(unit, reading.unit());
-        assertEquals(location, reading.location());
-        assertEquals(timestamp, reading.timestamp());
-    }
-
-    @Test
-    void testSensorReadingWithBooleanValue() {
-        // Given
-        Boolean motionValue = true;
-
-        // When
-        SensorReading motionReading = new SensorReading(
-                "sensor-042",
-                "motion",
-                motionValue,
-                "boolean",
-                "Entrance",
-                "2026-03-01T12:30:00Z");
-
-        // Then
-        assertEquals("motion", motionReading.type());
-        assertEquals(true, motionReading.value());
-    }
-
-    @Test
-    void testSensorReadingEquality() {
-        // Given
-        SensorReading reading1 = new SensorReading(
-                "sensor-001",
-                "temperature",
-                25.5,
-                "C",
-                "Office Room 1",
-                "2026-03-01T12:00:00Z");
-
-        SensorReading reading2 = new SensorReading(
-                "sensor-001",
-                "temperature",
-                25.5,
-                "C",
-                "Office Room 1",
-                "2026-03-01T12:00:00Z");
-
-        // Then
-        assertEquals(reading1, reading2);
-    }
-
-    @Test
-    void testSensorReadingToString() {
-        // Given
         SensorReading reading = new SensorReading(
-                "sensor-001",
-                "temperature",
-                22.5,
-                "C",
-                "Office",
-                "2026-03-01T12:00:00Z");
+                "rack-a1",
+                "intake_temp",
+                value,
+                "°C",
+                "2026-09-10T08:00:00Z");
 
-        // When
+        assertEquals("rack-a1", reading.deviceId());
+        assertEquals("intake_temp", reading.channel());
+        assertEquals(value, reading.value());
+        assertEquals("°C", reading.unit());
+        assertEquals("2026-09-10T08:00:00Z", reading.timestamp());
+    }
+
+    @Test
+    void preservesABooleanChannelValue() {
+        SensorReading reading = new SensorReading(
+                "rack-a1",
+                "door_contact",
+                Boolean.TRUE,
+                "state",
+                "2026-09-10T08:30:00Z");
+
+        assertEquals("door_contact", reading.channel());
+        assertEquals(true, reading.value());
+    }
+
+    @Test
+    void equalityIsByValue() {
+        SensorReading a = new SensorReading("ups-1", "load_pct", 41.0, "%", "2026-09-10T08:00:00Z");
+        SensorReading b = new SensorReading("ups-1", "load_pct", 41.0, "%", "2026-09-10T08:00:00Z");
+
+        assertEquals(a, b);
+    }
+
+    @Test
+    void toStringCarriesTheKeyAndValue() {
+        SensorReading reading = new SensorReading(
+                "pdu-a1", "power_draw", 1200, "W", "2026-09-10T08:00:00Z");
+
         String result = reading.toString();
 
-        // Then
-        assertTrue(result.contains("sensor-001"));
-        assertTrue(result.contains("temperature"));
-        assertTrue(result.contains("22.5"));
+        assertTrue(result.contains("pdu-a1"));
+        assertTrue(result.contains("power_draw"));
+        assertTrue(result.contains("1200"));
     }
 }

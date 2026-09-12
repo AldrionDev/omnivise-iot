@@ -1,1 +1,38 @@
 @import "tailwindcss";
+@import "./styles/tokens.css";
+
+@theme inline {
+  --color-background: var(--ov-color-background);
+  --color-surface: var(--ov-color-surface);
+  --color-surface-raised: var(--ov-color-surface-raised);
+  --color-border: var(--ov-color-border);
+  --color-foreground: var(--ov-color-foreground);
+  --color-muted: var(--ov-color-muted);
+  --color-accent: var(--ov-color-accent);
+  --color-status-ok: var(--ov-color-status-ok);
+  --color-status-warning: var(--ov-color-status-warning);
+  --color-status-critical: var(--ov-color-status-critical);
+
+  --radius-sm: var(--ov-radius-sm);
+  --radius-md: var(--ov-radius-md);
+  --radius-lg: var(--ov-radius-lg);
+
+  --spacing-xs: var(--ov-space-xs);
+  --spacing-sm: var(--ov-space-sm);
+  --spacing-md: var(--ov-space-md);
+  --spacing-lg: var(--ov-space-lg);
+  --spacing-xl: var(--ov-space-xl);
+
+  --font-sans: var(--ov-font-sans);
+  --font-mono: var(--ov-font-mono);
+  --text-sm: var(--ov-text-sm);
+  --text-base: var(--ov-text-base);
+  --text-lg: var(--ov-text-lg);
+  --leading-normal: var(--ov-leading-normal);
+}
+
+body {
+  background-color: var(--color-background);
+  color: var(--color-foreground);
+  font-family: var(--font-sans);
+}
