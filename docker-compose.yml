@@ -130,6 +130,7 @@ services:
       ANOMALY_EVERY_TICKS: ${SIMULATOR_ANOMALY_EVERY_TICKS:-60}
       ANOMALY_DURATION_TICKS: ${SIMULATOR_ANOMALY_DURATION_TICKS:-6}
       SEED: ${SIMULATOR_SEED:-42}
+      START_TIME: ${SIMULATOR_START_TIME:-}
     depends_on:
       mongodb:
         condition: service_healthy

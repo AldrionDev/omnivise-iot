@@ -1,6 +1,8 @@
 package com.omnivise.simulator;
 
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -13,6 +15,7 @@ import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoDatabase;
+import com.mongodb.client.model.Sorts;
 import com.omnivise.simulator.SimulatorEngine.Config;
 import com.omnivise.simulator.SimulatorEngine.Device;
 import com.omnivise.simulator.SimulatorEngine.Reading;
@@ -27,10 +30,8 @@ import com.omnivise.simulator.SimulatorEngine.Reading;
  * {@code timestamp} stored as a BSON {@code Date}.
  *
  * <p>All modelling lives in {@link SimulatorEngine}; this class only does env
- * parsing, Mongo I/O and the tick loop. The loop runs on an <em>absolute</em>
- * schedule (tick {@code k} is due at {@code start + (k + 1) * interval}) so the
- * real execution stays on the same grid as the deterministic generated
- * timestamps and processing time never accumulates into drift.
+ * parsing, Mongo I/O and the tick loop. The simulation epoch used for generated
+ * readings is independent from the runtime epoch used for pacing.
  */
 public class SensorDataSimulator {
 
@@ -52,7 +53,14 @@ public class SensorDataSimulator {
         int anomalyEveryTicks = envInt("ANOMALY_EVERY_TICKS", 60);
         int anomalyDurationTicks = envInt("ANOMALY_DURATION_TICKS", 6);
         long seed = resolveSeed(ENV.get("SEED"));
-        long startMillis = System.currentTimeMillis();
+        long startMillis;
+        try {
+            startMillis = resolveStartMillis(ENV.get("START_TIME"), System.currentTimeMillis());
+        } catch (IllegalArgumentException e) {
+            System.err.println("❌ Invalid configuration: " + e.getMessage());
+            System.exit(1);
+            return;
+        }
 
         // Fail fast on an invalid configuration, before opening any connection or
         // starting the loop (issue #71 finding B4).
@@ -72,6 +80,9 @@ public class SensorDataSimulator {
         System.out.println("📋 Collection: " + COLLECTION_NAME);
         System.out.println("⏱️  Interval: " + intervalSeconds + "s");
         System.out.println("🎲 Seed: " + seed + " (override with SEED)");
+        System.out.println("🕒 Start time: " + Instant.ofEpochMilli(startMillis)
+                + (ENV.get("START_TIME") == null || ENV.get("START_TIME").isBlank()
+                        ? " (wall clock)" : " (fixed by START_TIME)"));
         System.out.println("⚠️  Anomaly mode: " + anomalyMode
                 + " (every " + anomalyEveryTicks + " ticks, for " + anomalyDurationTicks + " ticks)");
         System.out.println("-".repeat(60));
@@ -103,28 +114,33 @@ public class SensorDataSimulator {
     }
 
     /**
-     * The tick loop. Tick {@code k} is due at
-     * {@code startMillis + (k + 1) * intervalSeconds * 1000}; after producing and
-     * sinking a tick we sleep only until that absolute instant (clamped to zero
-     * if the work overran), so processing time is corrected every tick instead of
-     * accumulating. Single-threaded, plain loop — no scheduler.
+     * The tick loop. The first tick runs immediately. Subsequent ticks use an
+     * absolute schedule anchored to the current runtime clock when this method
+     * starts, never to the simulation epoch. If sinking a tick misses its next
+     * deadline, the schedule is re-anchored one full interval after the current
+     * runtime time instead of executing catch-up ticks. Single-threaded, plain
+     * loop — no scheduler.
      *
      * @param engine          the deterministic signal model
      * @param sink            consumes one tick's readings (Mongo write in production)
-     * @param intervalSeconds simulated seconds per tick
-     * @param startMillis     wall-clock instant of tick 0 (also the engine's start)
-     * @param clock           current wall-clock millis
+     * @param intervalSeconds       simulated seconds per tick
+     * @param simulationStartMillis simulation epoch; deliberately not used for pacing
+     * @param clock                 current runtime-clock millis
      * @param sleeper         blocks for the requested millis
      * @param maxTicks        stop after this many ticks ({@link Long#MAX_VALUE} in production)
      */
     static void runLoop(SimulatorEngine engine,
             Consumer<List<Reading>> sink,
             int intervalSeconds,
-            long startMillis,
+            long simulationStartMillis,
             LongSupplier clock,
             Sleeper sleeper,
             long maxTicks) {
+        if (intervalSeconds < 1) {
+            throw new IllegalArgumentException("intervalSeconds must be >= 1");
+        }
         long intervalMillis = intervalSeconds * 1000L;
+        long nextTickDeadline = clock.getAsLong();
         for (long tick = 0; tick < maxTicks; tick++) {
             try {
                 List<Reading> batch = engine.tick(tick);
@@ -133,15 +149,28 @@ public class SensorDataSimulator {
                         "  ⚠️  anomaly %s [%s] %s/%s%n", a.scenario(), a.phase(), a.deviceId(), a.channel()));
                 System.out.printf("[tick %d] ✅ inserted %d readings%n", tick, batch.size());
 
-                long nextTickInstant = startMillis + (tick + 1) * intervalMillis;
-                long remaining = nextTickInstant - clock.getAsLong();
-                sleeper.sleep(Math.max(0L, remaining));
-            } catch (InterruptedException e) {
-                System.err.println("⚠️ Simulation interrupted.");
-                Thread.currentThread().interrupt();
-                return;
             } catch (Exception e) {
                 System.err.println("❌ Error during tick: " + e.getMessage());
+            } finally {
+                long now = clock.getAsLong();
+                long scheduledNextTick = nextTickDeadline + intervalMillis;
+                long remaining;
+                if (scheduledNextTick > now) {
+                    remaining = scheduledNextTick - now;
+                    nextTickDeadline = scheduledNextTick;
+                } else {
+                    // A blocking sink missed one or more deadlines. Start a new
+                    // cadence from now so recovery cannot produce catch-up ticks.
+                    nextTickDeadline = now + intervalMillis;
+                    remaining = intervalMillis;
+                }
+                try {
+                    sleeper.sleep(remaining);
+                } catch (InterruptedException e) {
+                    System.err.println("⚠️ Simulation interrupted.");
+                    Thread.currentThread().interrupt();
+                    return;
+                }
             }
         }
     }
@@ -156,6 +185,19 @@ public class SensorDataSimulator {
             return 42L;
         }
         return Long.parseLong(rawSeedEnv.trim());
+    }
+
+    /** Resolves an optional fixed ISO-8601 start instant, or launch time when blank. */
+    static long resolveStartMillis(String rawStartTime, long launchMillis) {
+        if (rawStartTime == null || rawStartTime.isBlank()) {
+            return launchMillis;
+        }
+        try {
+            return Instant.parse(rawStartTime.trim()).toEpochMilli();
+        } catch (Exception e) {
+            throw new IllegalArgumentException(
+                    "START_TIME must be an ISO-8601 instant, was " + rawStartTime, e);
+        }
     }
 
     /**
@@ -180,6 +222,7 @@ public class SensorDataSimulator {
                     doc.getString("kind"),
                     List.copyOf(channels)));
         }
+        devices.sort(Comparator.comparing(Device::deviceId));
         return devices;
     }
 
@@ -204,7 +247,9 @@ public class SensorDataSimulator {
 
     private static List<Document> readAllDevices(MongoDatabase database) {
         List<Document> docs = new ArrayList<>();
-        database.getCollection("devices").find().forEach(docs::add);
+        database.getCollection("devices").find()
+                .sort(Sorts.ascending("deviceId"))
+                .forEach(docs::add);
         return docs;
     }
 

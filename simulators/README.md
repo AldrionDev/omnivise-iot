@@ -28,10 +28,15 @@ reading per device/channel straight into the `sensor_readings` collection.
     the window, then `input_voltage` returns to nominal and `battery_pct`
     recharges.
 - **Deterministic**: signal noise and anomaly selection come from a seeded RNG
-  (`SEED`, default `42`); a run with the same `SEED` **and** start instant
-  repeats exactly. Generated timestamps are `start + tick * interval`, and the
-  I/O loop holds real execution to that same grid (absolute schedule, no
-  processing-time drift).
+  (`SEED`, default `42`). A run with the same `SEED`, configuration, simulation
+  start instant, and device set repeats exactly, including values, timestamps,
+  and device/channel ordering. Devices are ordered by `deviceId`; channel order
+  remains as declared in the registry. Generated timestamps are
+  `start + tick * interval`.
+- **Paced runtime**: the first tick runs immediately and subsequent ticks are
+  paced from the process runtime clock, independently of the simulation start
+  instant. A blocking write that misses a deadline re-anchors the next tick to
+  one full interval after the current runtime time, avoiding catch-up bursts.
 
 ## 🚀 Running
 
@@ -64,7 +69,8 @@ docker compose up -d sensor-simulator
 | `ANOMALY_MODE`           | `false`                                     | Enable anomaly injection                                                  |
 | `ANOMALY_EVERY_TICKS`    | `60`                                        | Ticks between anomaly onsets (~5 min at the default interval)             |
 | `ANOMALY_DURATION_TICKS` | `6`                                         | Length of the ACTIVE window (~30s at the default interval)               |
-| `SEED`                   | `42`                                        | PRNG seed; a run repeats exactly only given the **same** `SEED` **and** the same start instant (unset/blank → `42`) |
+| `SEED`                   | `42`                                        | PRNG seed; unset/blank → `42`                                                                                   |
+| `START_TIME`             | launch time                                 | Optional fixed ISO-8601 **simulation** start instant, e.g. `2026-09-10T00:00:00Z`; blank keeps launch-time behavior |
 
 The config is validated at startup and the simulator refuses to run on an
 invalid combination:
@@ -74,8 +80,12 @@ invalid combination:
   `ANOMALY_EVERY_TICKS > ANOMALY_DURATION_TICKS + recoveryTicks` where
   `recoveryTicks = max(2, ANOMALY_DURATION_TICKS / 2)`. Only then does the next
   onset land in a NORMAL phase, so the configured cadence actually holds (at most
-  one anomaly is ever active). With `ANOMALY_MODE=false` the anomaly values are
-  inert and not checked.
+   one anomaly is ever active). With `ANOMALY_MODE=false` the anomaly values are
+   inert and not checked.
+- when `START_TIME` is set, it must be an ISO-8601 instant; otherwise the
+  simulation starts at process launch time. This setting affects generated
+  timestamps and time-dependent signals only; it never delays process startup
+  or controls runtime pacing.
 
 ## 📊 Reading shape
 
