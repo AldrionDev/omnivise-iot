@@ -23,6 +23,45 @@ variable "simulator_image_ref" {
   description = "Immutable simulator container image reference. No default."
 }
 
+variable "simulator_anomaly_mode" {
+  type        = bool
+  default     = false
+  description = "Enable deterministic simulator anomaly injection."
+}
+
+variable "simulator_anomaly_every_ticks" {
+  type        = number
+  default     = 60
+  description = "Ticks between simulator anomaly onsets when anomaly mode is enabled."
+
+  validation {
+    condition     = var.simulator_anomaly_every_ticks >= 1 && floor(var.simulator_anomaly_every_ticks) == var.simulator_anomaly_every_ticks
+    error_message = "simulator_anomaly_every_ticks must be an integer >= 1."
+  }
+}
+
+variable "simulator_anomaly_duration_ticks" {
+  type        = number
+  default     = 6
+  description = "Length of the simulator anomaly ACTIVE window in ticks."
+
+  validation {
+    condition     = var.simulator_anomaly_duration_ticks >= 1 && floor(var.simulator_anomaly_duration_ticks) == var.simulator_anomaly_duration_ticks
+    error_message = "simulator_anomaly_duration_ticks must be an integer >= 1."
+  }
+}
+
+variable "simulator_seed" {
+  type        = number
+  default     = 42
+  description = "Deterministic simulator PRNG seed."
+
+  validation {
+    condition     = floor(var.simulator_seed) == var.simulator_seed
+    error_message = "simulator_seed must be an integer."
+  }
+}
+
 variable "mongodb_image" {
   type        = string
   default     = "mongo:7.0"
