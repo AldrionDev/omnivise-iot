@@ -691,7 +691,6 @@ pipeline {
                             node:22-alpine node -e '
 const target = "ws://" + process.env.INGRESS_HOST + "/ws/sensors";
 const DEADLINE_MS = 90000;
-const KNOWN_TYPES = ["temperature", "humidity", "motion", "light", "pressure"];
 const windowStart = Date.now();
 let done = false;
 
@@ -722,21 +721,29 @@ ws.addEventListener("message", (ev) => {
   } catch (_) {
     return;
   }
-  if (!r || typeof r.sensorId !== "string" || r.sensorId === "") return;
-  if (KNOWN_TYPES.indexOf(r.type) === -1) return;
-  if (typeof r.unit !== "string" || typeof r.location !== "string") return;
-  const t = Date.parse(r.timestamp);
+
+  if (!r || r.kind !== "reading") return;
+
+  const p = r.payload;
+  if (!p || typeof p.deviceId !== "string" || p.deviceId === "") return;
+  if (typeof p.channel !== "string" || p.channel === "") return;
+  if (!Object.prototype.hasOwnProperty.call(p, "value")) return;
+  if (typeof p.unit !== "string") return;
+
+  const t = Date.parse(p.timestamp);
   if (Number.isNaN(t)) return;
+
   // Tolerate benign agent/container clock skew: ignore an implausibly old
   // frame and keep listening. If no acceptable event arrives, the DEADLINE_MS
   // timer above still fails the smoke closed.
   if (t < windowStart - 60000) return;
+
   done = true;
   clearTimeout(timer);
   console.log(
-    "fresh OmniVise sensor event: sensorId=" + r.sensorId +
-    " type=" + r.type + " value=" + r.value + " unit=" + r.unit +
-    " timestamp=" + r.timestamp
+    "fresh OmniVise sensor event: deviceId=" + p.deviceId +
+    " channel=" + p.channel + " value=" + p.value + " unit=" + p.unit +
+    " timestamp=" + p.timestamp
   );
   try { ws.close(); } catch (_) {}
   process.exit(0);
