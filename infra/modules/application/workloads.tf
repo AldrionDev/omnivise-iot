@@ -63,6 +63,17 @@ resource "kubernetes_deployment_v1" "backend" {
   # rollout mirrors the MongoDB StatefulSet deadlock-avoidance rationale.
   wait_for_rollout = false
 
+  lifecycle {
+    precondition {
+      condition = (
+        !var.simulator_anomaly_mode ||
+        var.simulator_anomaly_every_ticks >
+        var.simulator_anomaly_duration_ticks + max(2, floor(var.simulator_anomaly_duration_ticks / 2))
+      )
+      error_message = "When simulator anomaly mode is enabled, simulator_anomaly_every_ticks must be greater than simulator_anomaly_duration_ticks + recovery ticks."
+    }
+  }
+
   spec {
     replicas = 1
 
@@ -378,6 +389,26 @@ resource "kubernetes_deployment_v1" "sensor_simulator" {
           env {
             name  = "INTERVAL_SECONDS"
             value = local.sensor_interval
+          }
+
+          env {
+            name  = "ANOMALY_MODE"
+            value = tostring(var.simulator_anomaly_mode)
+          }
+
+          env {
+            name  = "ANOMALY_EVERY_TICKS"
+            value = tostring(var.simulator_anomaly_every_ticks)
+          }
+
+          env {
+            name  = "ANOMALY_DURATION_TICKS"
+            value = tostring(var.simulator_anomaly_duration_ticks)
+          }
+
+          env {
+            name  = "SEED"
+            value = tostring(var.simulator_seed)
           }
 
           resources {
