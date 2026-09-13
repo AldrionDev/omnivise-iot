@@ -5,7 +5,6 @@ import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.Random;
 
@@ -30,9 +29,9 @@ import java.util.Random;
  *       is mostly {@code "closed"} with rare, seed-deterministic opens.</li>
  * </ul>
  *
- * <p>Anomalies are a small explicit state machine
- * ({@code NORMAL -> ACTIVE -> RECOVERY -> NORMAL}), at most one at a time,
- * scenarios cycled round-robin. They are inert unless {@link Config#anomalyMode()}.
+ * <p>Anomalies are bounded concurrent instances with explicit ACTIVE and
+ * RECOVERY deadlines. Scenarios cycle round-robin and are inert unless
+ * {@link Config#anomalyMode()}.
  */
 public final class SimulatorEngine {
 
@@ -48,8 +47,8 @@ public final class SimulatorEngine {
     public record Reading(String deviceId, String channel, Object value, String unit, Date timestamp) {
     }
 
-    /** Observable snapshot of the anomaly state machine. */
-    public record AnomalyInfo(String phase, String scenario, String deviceId, String channel) {
+    /** Observable snapshot of one anomaly instance. */
+    public record AnomalyInfo(long id, String phase, String scenario, String deviceId, String channel) {
     }
 
     /**
@@ -58,18 +57,16 @@ public final class SimulatorEngine {
      * <p>Validated on construction (issue #71 finding B4): {@code intervalSeconds}
      * must be at least 1, and — only when {@code anomalyMode} is on —
      * {@code anomalyDurationTicks} must be at least 1 and
-     * {@code anomalyEveryTicks} must be strictly greater than
-     * {@code anomalyDurationTicks + recoveryTicks} (with
-     * {@code recoveryTicks = max(2, anomalyDurationTicks / 2)}). Only then can the
-     * next onset land in a NORMAL phase, so the configured cadence actually holds
-     * with at most one anomaly active. With {@code anomalyMode} off the anomaly
-     * values are inert and left unchecked.
+     * {@code anomalyEveryTicks} must be at least 1, and
+     * {@code maxConcurrentAnomalies} must be 1 or 2. With {@code anomalyMode} off
+     * the anomaly values are inert and left unchecked.
      *
      * @param intervalSeconds      simulated seconds between ticks ({@code >= 1})
      * @param seed                 PRNG seed; equal seeds produce equal sequences
      * @param anomalyMode          when {@code false}, the engine never leaves NORMAL
      * @param anomalyEveryTicks    ticks between anomaly onsets
      * @param anomalyDurationTicks length of the ACTIVE window
+     * @param maxConcurrentAnomalies maximum simultaneous ACTIVE/RECOVERY instances
      * @param anomalyScenarios     scenarios cycled round-robin on each onset
      *                             ({@code "breach_high"}, {@code "mains_loss"})
      * @param startEpochMillis     simulated instant of tick 0
@@ -80,6 +77,7 @@ public final class SimulatorEngine {
             boolean anomalyMode,
             int anomalyEveryTicks,
             int anomalyDurationTicks,
+            int maxConcurrentAnomalies,
             List<String> anomalyScenarios,
             long startEpochMillis) {
 
@@ -94,22 +92,22 @@ public final class SimulatorEngine {
                             "ANOMALY_DURATION_TICKS must be >= 1 when ANOMALY_MODE is on, was "
                                     + anomalyDurationTicks);
                 }
-                int recovery = recoveryTicks(anomalyDurationTicks);
-                int minEvery = anomalyDurationTicks + recovery + 1;
-                if (anomalyEveryTicks < minEvery) {
+                if (anomalyEveryTicks < 1) {
                     throw new IllegalArgumentException(
-                            "ANOMALY_EVERY_TICKS must be > ANOMALY_DURATION_TICKS + recoveryTicks ("
-                                    + anomalyDurationTicks + " + " + recovery + "); need >= "
-                                    + minEvery + ", was " + anomalyEveryTicks
-                                    + " — otherwise the next onset falls inside ACTIVE/RECOVERY and"
-                                    + " the configured cadence cannot hold");
+                            "ANOMALY_EVERY_TICKS must be >= 1 when ANOMALY_MODE is on, was "
+                                    + anomalyEveryTicks);
+                }
+                if (maxConcurrentAnomalies < 1 || maxConcurrentAnomalies > 2) {
+                    throw new IllegalArgumentException(
+                            "MAX_CONCURRENT_ANOMALIES must be 1 or 2 when ANOMALY_MODE is on, was "
+                                    + maxConcurrentAnomalies);
                 }
             }
         }
 
         /** Documented issue #71 defaults, with anomalies off. */
         public static Config defaults(long seed, long startEpochMillis) {
-            return new Config(5, seed, false, 60, 6,
+            return new Config(5, seed, false, 60, 6, 2,
                     List.of("breach_high", "mains_loss"), startEpochMillis);
         }
     }
@@ -125,20 +123,35 @@ public final class SimulatorEngine {
     private final Config config;
     private final Random random;
     private final int recoveryTicks;
-    private final List<String[]> breachTargets;
+    private final List<ChannelRef> breachTargets;
+    private final List<ChannelRef> mainsLossFootprint;
 
     // State carried across ticks.
     private final Map<String, Double> lastLoad = new LinkedHashMap<>();
     private final Map<String, Double> batteryPct = new LinkedHashMap<>();
     private final Map<String, Integer> doorOpenRemaining = new LinkedHashMap<>();
 
-    private String anomalyPhase = "NORMAL";
-    private String anomalyScenario;
-    private String anomalyDeviceId;
-    private String anomalyChannel;
-    private long anomalyActiveUntil;
-    private long anomalyRecoveryUntil;
-    private int anomalyTriggerCount;
+    private final List<AnomalyInstance> anomalies = new ArrayList<>();
+    private int scenarioCursor;
+    private long nextAnomalyId = 1;
+    private long currentTick = -1;
+
+    private record ChannelRef(String deviceId, String channel) {
+    }
+
+    private record AnomalyInstance(
+            long id,
+            String scenario,
+            ChannelRef displayTarget,
+            List<ChannelRef> footprint,
+            long startTick,
+            long activeUntil,
+            long recoveryUntil) {
+
+        String phase(long tickIndex) {
+            return tickIndex < activeUntil ? "ACTIVE" : "RECOVERY";
+        }
+    }
 
     public SimulatorEngine(List<Device> registry, Config config) {
         this.registry = List.copyOf(registry);
@@ -146,10 +159,12 @@ public final class SimulatorEngine {
         this.random = new Random(config.seed());
         this.recoveryTicks = recoveryTicks(config.anomalyDurationTicks());
         this.breachTargets = buildBreachTargets(this.registry);
+        this.mainsLossFootprint = buildMainsLossFootprint(this.registry);
     }
 
     /** Readings for one tick, in registry order (device order, then channel order). */
     public List<Reading> tick(long tickIndex) {
+        currentTick = tickIndex;
         advanceAnomaly(tickIndex);
 
         double simSeconds = config.startEpochMillis() / 1000.0 + tickIndex * config.intervalSeconds();
@@ -195,7 +210,6 @@ public final class SimulatorEngine {
         double meanExhaust = rackCount > 0 ? sumExhaust / rackCount : 30.0;
 
         // --- ups ---
-        boolean mainsLoss = mainsLossActive();
         double lineVoltage = NOMINAL_LINE_VOLTAGE;
         for (Device device : registry) {
             if (!"ups".equals(device.kind())) {
@@ -203,13 +217,15 @@ public final class SimulatorEngine {
             }
             Map<String, Object> ch = channelMap(values, device.deviceId());
 
-            double inputVoltage = mainsLoss
+            boolean inputVoltageAffected = activeAnomalyAffects(device.deviceId(), "input_voltage", "mains_loss");
+            boolean batteryAffected = activeAnomalyAffects(device.deviceId(), "battery_pct", "mains_loss");
+            double inputVoltage = inputVoltageAffected
                     ? clamp(2.0 + noise(1.0), 0.0, 10.0)
                     : clamp(NOMINAL_LINE_VOLTAGE + noise(0.4), 0.0, 245.0);
             double loadPct = clamp(100.0 * totalRackPower / 6800.0 + noise(0.5), 0.0, 100.0);
 
             double battery = batteryPct.getOrDefault(device.deviceId(), 100.0);
-            battery = clamp(battery + (mainsLoss ? -2.5 : 1.0), 0.0, 100.0);
+            battery = clamp(battery + (batteryAffected ? -2.5 : 1.0), 0.0, 100.0);
             batteryPct.put(device.deviceId(), battery);
 
             ch.put("load_pct", round1(loadPct));
@@ -265,12 +281,16 @@ public final class SimulatorEngine {
         return readings;
     }
 
-    /** Current anomaly, or empty while in NORMAL. */
-    public Optional<AnomalyInfo> currentAnomaly() {
-        if ("NORMAL".equals(anomalyPhase)) {
-            return Optional.empty();
-        }
-        return Optional.of(new AnomalyInfo(anomalyPhase, anomalyScenario, anomalyDeviceId, anomalyChannel));
+    /** Immutable current anomaly snapshot in deterministic admission/ID order. */
+    public List<AnomalyInfo> currentAnomalies() {
+        return anomalies.stream()
+                .map(anomaly -> new AnomalyInfo(
+                        anomaly.id(),
+                        anomaly.phase(currentTick),
+                        anomaly.scenario(),
+                        anomaly.displayTarget().deviceId(),
+                        anomaly.displayTarget().channel()))
+                .toList();
     }
 
     /** Last synthetic load computed for a rack device, for correlation assertions. */
@@ -284,68 +304,103 @@ public final class SimulatorEngine {
     // ------------------------------------------------------------------
 
     private void advanceAnomaly(long tickIndex) {
-        switch (anomalyPhase) {
-            case "NORMAL" -> {
-                if (config.anomalyMode()
-                        && !config.anomalyScenarios().isEmpty()
-                        && tickIndex > 0
-                        && tickIndex % config.anomalyEveryTicks() == 0) {
-                    startAnomaly(tickIndex);
-                }
-            }
-            case "ACTIVE" -> {
-                if (tickIndex >= anomalyActiveUntil) {
-                    anomalyPhase = "RECOVERY";
-                    anomalyRecoveryUntil = tickIndex + recoveryTicks;
-                }
-            }
-            case "RECOVERY" -> {
-                if (tickIndex >= anomalyRecoveryUntil) {
-                    anomalyPhase = "NORMAL";
-                    anomalyScenario = null;
-                    anomalyDeviceId = null;
-                    anomalyChannel = null;
-                }
-            }
-            default -> throw new IllegalStateException("unknown anomaly phase: " + anomalyPhase);
+        anomalies.removeIf(anomaly -> tickIndex >= anomaly.recoveryUntil());
+
+        if (config.anomalyMode()
+                && !config.anomalyScenarios().isEmpty()
+                && anomalies.size() < config.maxConcurrentAnomalies()
+                && tickIndex > 0
+                && tickIndex % config.anomalyEveryTicks() == 0) {
+            admitAnomaly(tickIndex);
         }
     }
 
-    private void startAnomaly(long tickIndex) {
+    private void admitAnomaly(long tickIndex) {
         List<String> scenarios = config.anomalyScenarios();
-        String scenario = scenarios.get(anomalyTriggerCount % scenarios.size());
-        anomalyTriggerCount++;
-        anomalyPhase = "ACTIVE";
-        anomalyScenario = scenario;
-        anomalyActiveUntil = tickIndex + config.anomalyDurationTicks();
+        String scenario = scenarios.get(scenarioCursor % scenarios.size());
+        ChannelRef displayTarget;
+        List<ChannelRef> footprint;
 
         if ("mains_loss".equals(scenario)) {
-            anomalyDeviceId = firstDeviceOfKind("ups");
-            anomalyChannel = "battery_pct";
+            footprint = mainsLossFootprint;
+            if (footprint.isEmpty() || intersectsReservedFootprint(footprint)) {
+                return;
+            }
+            displayTarget = footprint.stream()
+                    .filter(target -> "battery_pct".equals(target.channel()))
+                    .findFirst()
+                    .orElse(footprint.get(0));
         } else {
-            String[] target = breachTargets.isEmpty()
-                    ? new String[] {firstDeviceId(), firstChannelName()}
-                    : breachTargets.get(random.nextInt(breachTargets.size()));
-            anomalyDeviceId = target[0];
-            anomalyChannel = target[1];
+            displayTarget = selectBreachTarget();
+            if (displayTarget == null) {
+                return;
+            }
+            footprint = List.of(displayTarget);
         }
+
+        long activeUntil = tickIndex + config.anomalyDurationTicks();
+        anomalies.add(new AnomalyInstance(
+                nextAnomalyId++,
+                scenario,
+                displayTarget,
+                footprint,
+                tickIndex,
+                activeUntil,
+                activeUntil + recoveryTicks));
+        scenarioCursor++;
     }
 
-    private boolean mainsLossActive() {
-        return "ACTIVE".equals(anomalyPhase) && "mains_loss".equals(anomalyScenario);
+    private ChannelRef selectBreachTarget() {
+        if (breachTargets.isEmpty()) {
+            return null;
+        }
+        boolean hasAvailableTarget = breachTargets.stream()
+                .anyMatch(target -> !isReserved(target));
+        if (!hasAvailableTarget) {
+            return null;
+        }
+
+        int start = random.nextInt(breachTargets.size());
+        for (int offset = 0; offset < breachTargets.size(); offset++) {
+            ChannelRef target = breachTargets.get((start + offset) % breachTargets.size());
+            if (!isReserved(target)) {
+                return target;
+            }
+        }
+        throw new IllegalStateException("available breach target was not found");
+    }
+
+    private boolean intersectsReservedFootprint(List<ChannelRef> footprint) {
+        return footprint.stream().anyMatch(this::isReserved);
+    }
+
+    private boolean isReserved(ChannelRef target) {
+        return anomalies.stream().anyMatch(anomaly -> anomaly.footprint().contains(target));
+    }
+
+    private boolean activeAnomalyAffects(String deviceId, String channel, String scenario) {
+        ChannelRef target = new ChannelRef(deviceId, channel);
+        return anomalies.stream().anyMatch(anomaly ->
+                scenario.equals(anomaly.scenario())
+                        && "ACTIVE".equals(anomaly.phase(currentTick))
+                        && anomaly.footprint().contains(target));
     }
 
     private void applyBreachOverlay(Map<String, Map<String, Object>> values) {
-        if (!"ACTIVE".equals(anomalyPhase) || !"breach_high".equals(anomalyScenario)) {
-            return;
+        for (AnomalyInstance anomaly : anomalies) {
+            if (!"ACTIVE".equals(anomaly.phase(currentTick)) || !"breach_high".equals(anomaly.scenario())) {
+                continue;
+            }
+            ChannelRef target = anomaly.displayTarget();
+            Map<String, Object> ch = values.get(target.deviceId());
+            if (ch == null || !(ch.get(target.channel()) instanceof Number normal)) {
+                continue;
+            }
+            String unit = unitOf(target.deviceId(), target.channel());
+            double breached = breachHigh(normal.doubleValue(), unit);
+            ch.put(target.channel(), "W".equals(unit) || "rpm".equals(unit)
+                    ? round0(breached) : round1(breached));
         }
-        Map<String, Object> ch = values.get(anomalyDeviceId);
-        if (ch == null || !(ch.get(anomalyChannel) instanceof Number normal)) {
-            return;
-        }
-        String unit = unitOf(anomalyDeviceId, anomalyChannel);
-        double breached = breachHigh(normal.doubleValue(), unit);
-        ch.put(anomalyChannel, "W".equals(unit) || "rpm".equals(unit) ? round0(breached) : round1(breached));
     }
 
     private static double breachHigh(double normal, String unit) {
@@ -415,8 +470,8 @@ public final class SimulatorEngine {
         return values.computeIfAbsent(deviceId, k -> new LinkedHashMap<>());
     }
 
-    private static List<String[]> buildBreachTargets(List<Device> registry) {
-        List<String[]> targets = new ArrayList<>();
+    private static List<ChannelRef> buildBreachTargets(List<Device> registry) {
+        List<ChannelRef> targets = new ArrayList<>();
         for (Device device : registry) {
             for (Channel channel : device.channels()) {
                 boolean canonicalWarningTarget =
@@ -425,28 +480,26 @@ public final class SimulatorEngine {
                         || ("crac".equals(device.kind()) && "return_temp".equals(channel.name()));
 
                 if (canonicalWarningTarget) {
-                    targets.add(new String[] {device.deviceId(), channel.name()});
+                    targets.add(new ChannelRef(device.deviceId(), channel.name()));
                 }
             }
         }
-        return targets;
+        return List.copyOf(targets);
     }
 
-    private String firstDeviceOfKind(String kind) {
+    private static List<ChannelRef> buildMainsLossFootprint(List<Device> registry) {
+        List<ChannelRef> footprint = new ArrayList<>();
         for (Device device : registry) {
-            if (kind.equals(device.kind())) {
-                return device.deviceId();
+            if (!"ups".equals(device.kind())) {
+                continue;
+            }
+            for (Channel channel : device.channels()) {
+                if ("battery_pct".equals(channel.name()) || "input_voltage".equals(channel.name())) {
+                    footprint.add(new ChannelRef(device.deviceId(), channel.name()));
+                }
             }
         }
-        return firstDeviceId();
-    }
-
-    private String firstDeviceId() {
-        return registry.get(0).deviceId();
-    }
-
-    private String firstChannelName() {
-        return registry.get(0).channels().get(0).name();
+        return List.copyOf(footprint);
     }
 
     private String unitOf(String deviceId, String channelName) {
