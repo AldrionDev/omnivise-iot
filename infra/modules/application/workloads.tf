@@ -73,6 +73,9 @@ resource "kubernetes_deployment_v1" "backend" {
     template {
       metadata {
         labels = local.backend_labels
+        annotations = {
+          "omnivise-iot/application-bootstrap-sha256" = sha256(var.mongodb_application_bootstrap_script)
+        }
       }
 
       spec {
@@ -170,7 +173,7 @@ resource "kubernetes_deployment_v1" "backend" {
     }
   }
 
-  depends_on = [kubernetes_service_v1.mongodb]
+  depends_on = [kubernetes_job_v1.mongodb_application_bootstrap]
 }
 
 resource "kubernetes_service_v1" "backend" {
@@ -314,6 +317,9 @@ resource "kubernetes_deployment_v1" "sensor_simulator" {
     template {
       metadata {
         labels = local.simulator_labels
+        annotations = {
+          "omnivise-iot/application-bootstrap-sha256" = sha256(var.mongodb_application_bootstrap_script)
+        }
       }
 
       spec {
@@ -393,7 +399,7 @@ resource "kubernetes_deployment_v1" "sensor_simulator" {
     }
   }
 
-  depends_on = [kubernetes_service_v1.mongodb]
+  depends_on = [kubernetes_job_v1.mongodb_application_bootstrap]
 }
 
 # NOTE: no kubernetes_service_v1 for the simulator - it must have no Service.

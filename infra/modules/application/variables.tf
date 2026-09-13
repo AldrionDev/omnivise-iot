@@ -34,6 +34,16 @@ variable "mongodb_image" {
   }
 }
 
+variable "mongodb_application_bootstrap_script" {
+  type        = string
+  description = "Canonical MongoDB application bootstrap script supplied by the environment root."
+
+  validation {
+    condition     = length(trimspace(var.mongodb_application_bootstrap_script)) > 0
+    error_message = "mongodb_application_bootstrap_script must not be empty."
+  }
+}
+
 variable "mongodb_replica_set_name" {
   type        = string
   default     = "rs0"

@@ -284,7 +284,241 @@ run_rejected_selector_case() {
   CURRENT_PROJECT=""
 }
 
+
+run_legacy_persistent_upgrade_case() {
+  local project="issue105-legacy-runtime-$$"
+  local database="omnivise_iot"
+  local mongodb="$project-mongodb"
+  local seeder="$project-mongo-seed"
+  local -a compose_env=(
+    env
+    --unset=MONGO_INITDB_DATABASE
+    COMPOSE_PROJECT_NAME="$project"
+    ISSUE98_IMAGE_PREFIX="$IMAGE_PREFIX"
+  )
+
+  CURRENT_PROJECT="$project"
+
+  "${compose_env[@]}" docker compose "${COMPOSE_ARGS[@]}" up -d mongodb
+
+  local mongo_health=""
+  for _ in $(seq 1 60); do
+    mongo_health="$(docker inspect --format '{{.State.Health.Status}}' "$mongodb")"
+    [ "$mongo_health" = "healthy" ] && break
+    sleep 2
+  done
+  [ "$mongo_health" = "healthy" ]
+
+  local legacy_before
+  legacy_before="$(docker exec "$mongodb" mongosh --quiet --eval "
+    const configured = db.getSiblingDB('$database');
+
+    configured.sensor_readings.insertMany([
+      {
+        sensorId: 'legacy-temp-1',
+        value: 20.5,
+        unit: '°C',
+        timestamp: ISODate('2026-09-01T10:00:00Z'),
+      },
+      {
+        sensorId: 'legacy-humidity-1',
+        value: 44.0,
+        unit: '%',
+        timestamp: ISODate('2026-09-01T10:00:05Z'),
+      },
+      {
+        sensorId: 'legacy-light-1',
+        value: 580,
+        unit: 'lux',
+        timestamp: ISODate('2026-09-01T10:00:10Z'),
+      },
+    ]);
+
+    if (configured.devices.countDocuments() !== 0) quit(1);
+    if (configured.alert_rules.countDocuments() !== 0) quit(1);
+    if (configured.alert_sequences.countDocuments() !== 0) quit(1);
+    if (configured.sensor_readings.countDocuments() !== 3) quit(1);
+
+    print(EJSON.stringify(
+      configured.sensor_readings.find({}).sort({ timestamp: 1 }).toArray(),
+      { relaxed: false },
+    ));
+  ")"
+
+  "${compose_env[@]}" docker compose "${COMPOSE_ARGS[@]}" up -d mongo-seed
+
+  local seed_exit=""
+  for _ in $(seq 1 60); do
+    seed_exit="$(docker inspect --format '{{.State.ExitCode}}' "$seeder")"
+    [ "$seed_exit" != "0" ] || {
+      local running
+      running="$(docker inspect --format '{{.State.Running}}' "$seeder")"
+      [ "$running" = "false" ] && break
+    }
+    sleep 1
+  done
+
+  [ "$(docker inspect --format '{{.State.Running}}' "$seeder")" = "false" ]
+  [ "$(docker inspect --format '{{.State.ExitCode}}' "$seeder")" = "0" ]
+
+  local legacy_after
+  legacy_after="$(docker exec "$mongodb" mongosh --quiet --eval "
+    const configured = db.getSiblingDB('$database');
+
+    const legacy = configured.sensor_readings
+      .find({ sensorId: { \$exists: true } })
+      .sort({ timestamp: 1 })
+      .toArray();
+
+    if (legacy.length !== 3) quit(1);
+    if (configured.devices.countDocuments() !== 5) quit(1);
+    if (configured.alert_rules.countDocuments() !== 5) quit(1);
+
+    const sequence = configured.alert_sequences.findOne({ _id: 'global' });
+    if (!sequence || sequence.value.toString() !== '0') quit(1);
+
+    const seededReadingTimes = [
+      ISODate('2026-09-10T08:00:00Z'),
+      ISODate('2026-09-10T08:05:00Z'),
+    ];
+    const seededReadings = configured.sensor_readings
+      .find({ timestamp: { \$in: seededReadingTimes } })
+      .toArray();
+
+    if (seededReadings.length !== 40) quit(1);
+    if (configured.sensor_readings.countDocuments() !== 43) quit(1);
+
+    print(EJSON.stringify(legacy, { relaxed: false }));
+  ")"
+
+  [ "$legacy_before" = "$legacy_after" ]
+  printf 'legacy historical readings preserved across bootstrap\n'
+
+  local canonical_before
+  canonical_before="$(docker exec "$mongodb" mongosh --quiet --eval "
+    const configured = db.getSiblingDB('$database');
+    print(EJSON.stringify({
+      devices: configured.devices.find({}).sort({ _id: 1 }).toArray(),
+      alertRules: configured.alert_rules.find({}).sort({ _id: 1 }).toArray(),
+      alertSequences: configured.alert_sequences.find({}).sort({ _id: 1 }).toArray(),
+      seededReadings: configured.sensor_readings
+        .find({
+          timestamp: {
+            \$in: [
+              ISODate('2026-09-10T08:00:00Z'),
+              ISODate('2026-09-10T08:05:00Z'),
+            ],
+          },
+        })
+        .sort({ deviceId: 1, channel: 1, timestamp: 1, unit: 1, value: 1 })
+        .toArray(),
+    }, { relaxed: false }));
+  ")"
+
+  docker start -a "$seeder"
+
+  local canonical_after
+  canonical_after="$(docker exec "$mongodb" mongosh --quiet --eval "
+    const configured = db.getSiblingDB('$database');
+    print(EJSON.stringify({
+      devices: configured.devices.find({}).sort({ _id: 1 }).toArray(),
+      alertRules: configured.alert_rules.find({}).sort({ _id: 1 }).toArray(),
+      alertSequences: configured.alert_sequences.find({}).sort({ _id: 1 }).toArray(),
+      seededReadings: configured.sensor_readings
+        .find({
+          timestamp: {
+            \$in: [
+              ISODate('2026-09-10T08:00:00Z'),
+              ISODate('2026-09-10T08:05:00Z'),
+            ],
+          },
+        })
+        .sort({ deviceId: 1, channel: 1, timestamp: 1, unit: 1, value: 1 })
+        .toArray(),
+    }, { relaxed: false }));
+  ")"
+
+  [ "$canonical_before" = "$canonical_after" ]
+  printf 'legacy upgrade bootstrap is idempotent\n'
+
+  docker exec "$mongodb" mongosh --quiet --eval "
+    const configured = db.getSiblingDB('$database');
+    configured.alert_sequences.updateOne(
+      { _id: 'global' },
+      { \$set: { value: NumberLong('7') } },
+    );
+  "
+
+  docker start -a "$seeder"
+
+  docker exec "$mongodb" mongosh --quiet --eval "
+    const configured = db.getSiblingDB('$database');
+    const sequence = configured.alert_sequences.findOne({ _id: 'global' });
+    if (!sequence || sequence.value.toString() !== '7') quit(1);
+    print('existing nonzero alert sequence preserved: ' + sequence.value);
+  "
+
+  "${compose_env[@]}" docker compose "${COMPOSE_ARGS[@]}" down -v
+  CURRENT_PROJECT=""
+
+  local partial_project="issue105-partial-runtime-$$"
+  local partial_mongodb="$partial_project-mongodb"
+  local -a partial_env=(
+    env
+    --unset=MONGO_INITDB_DATABASE
+    COMPOSE_PROJECT_NAME="$partial_project"
+    ISSUE98_IMAGE_PREFIX="$IMAGE_PREFIX"
+  )
+
+  CURRENT_PROJECT="$partial_project"
+
+  "${partial_env[@]}" docker compose "${COMPOSE_ARGS[@]}" up -d mongodb
+
+  mongo_health=""
+  for _ in $(seq 1 60); do
+    mongo_health="$(docker inspect --format '{{.State.Health.Status}}' "$partial_mongodb")"
+    [ "$mongo_health" = "healthy" ] && break
+    sleep 2
+  done
+  [ "$mongo_health" = "healthy" ]
+
+  docker exec "$partial_mongodb" mongosh --quiet --eval "
+    const configured = db.getSiblingDB('$database');
+
+    configured.sensor_readings.insertMany([
+      {
+        sensorId: 'legacy-temp-1',
+        value: 20.5,
+        unit: '°C',
+        timestamp: ISODate('2026-09-01T10:00:00Z'),
+      },
+      {
+        deviceId: 'rack-a1',
+        channel: 'intake_temp',
+        value: -999,
+        unit: '°C',
+        timestamp: ISODate('2026-09-10T08:00:00Z'),
+      },
+    ]);
+  "
+
+  local partial_output=""
+  if partial_output="$("${partial_env[@]}" docker compose "${COMPOSE_ARGS[@]}" run \
+    --rm --no-deps mongo-seed 2>&1)"; then
+    printf 'partial canonical legacy state unexpectedly succeeded\n' >&2
+    return 1
+  fi
+
+  grep -q "existing state is partial or inconsistent" <<<"$partial_output"
+  grep -q "expected exactly one seeded reading" <<<"$partial_output"
+  printf 'partial canonical legacy state rejected fail-closed\n'
+
+  "${partial_env[@]}" docker compose "${COMPOSE_ARGS[@]}" down -v
+  CURRENT_PROJECT=""
+}
+
 run_case default omnivise_iot --build
+run_legacy_persistent_upgrade_case
 run_rejected_selector_case empty ""
 run_rejected_selector_case whitespace "   "
 run_case alternate omnivise_iot_test --no-build
