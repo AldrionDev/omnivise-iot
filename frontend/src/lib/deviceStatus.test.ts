@@ -42,6 +42,27 @@ describe('deriveDeviceStatus', () => {
     expect(deriveDeviceStatus('rack-a1', alerts)).toBe('critical')
   })
 
+  it('remains critical until both independent UPS critical alerts resolve', () => {
+    const inputVoltage = activeAlert({
+      id: 'ups-voltage',
+      ruleId: 'ups-input-voltage-low',
+      deviceId: 'ups-1',
+      channel: 'input_voltage',
+      severity: 'critical',
+    })
+    const battery = activeAlert({
+      id: 'ups-battery',
+      ruleId: 'ups-battery-low',
+      deviceId: 'ups-1',
+      channel: 'battery_pct',
+      severity: 'critical',
+    })
+
+    expect(deriveDeviceStatus('ups-1', [inputVoltage, battery])).toBe('critical')
+    expect(deriveDeviceStatus('ups-1', [battery])).toBe('critical')
+    expect(deriveDeviceStatus('ups-1', [])).toBe('ok')
+  })
+
   it('ignores alerts belonging to other devices', () => {
     const alerts = [activeAlert({ deviceId: 'ups-1', severity: 'critical' })]
     expect(deriveDeviceStatus('rack-a1', alerts)).toBe('ok')
