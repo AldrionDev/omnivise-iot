@@ -49,3 +49,5 @@ desktop.ini
 *.tfstate.*
 tfplan
 *.tfplan
+
+.playwright-mcp/

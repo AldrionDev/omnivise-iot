@@ -497,6 +497,37 @@ class SimulatorEngineTest {
     }
 
     @Test
+    void breachHighTargetsOnlyCanonicalWarningAlertChannels() {
+        SimulatorEngine engine = engine(new Config(
+                5, 42L, true, 10, 3,
+                List.of("breach_high"), START_EPOCH_MILLIS));
+
+        java.util.Set<String> allowed = java.util.Set.of(
+                "rack-a1/intake_temp",
+                "rack-a1/humidity",
+                "rack-a2/intake_temp",
+                "rack-a2/humidity",
+                "crac-1/return_temp");
+
+        java.util.Set<String> observed = new java.util.HashSet<>();
+
+        for (int tick = 0; tick <= 1_000; tick++) {
+            engine.tick(tick);
+            Optional<AnomalyInfo> anomaly = engine.currentAnomaly();
+
+            if (anomaly.isPresent() && "ACTIVE".equals(anomaly.get().phase())) {
+                String target = anomaly.get().deviceId() + "/" + anomaly.get().channel();
+                assertTrue(allowed.contains(target),
+                        "breach_high selected a channel without a canonical warning alert rule: " + target);
+                observed.add(target);
+            }
+        }
+
+        assertEquals(allowed, observed,
+                "deterministic breach_high selection should exercise every canonical warning alert target");
+    }
+
+    @Test
     void mainsLossAnomalyDischargesTheBatteryThenRecharges() {
         SimulatorEngine engine = engine(anomalyConfig(31L, "mains_loss"));
 
