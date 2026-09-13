@@ -32,6 +32,18 @@ locals {
   })
 }
 
+resource "kubernetes_config_map_v1" "mongodb_application_bootstrap" {
+  metadata {
+    name      = "mongodb-application-bootstrap"
+    namespace = local.mongodb_namespace
+    labels    = local.mongodb_labels
+  }
+
+  data = {
+    "mongo-init.js" = var.mongodb_application_bootstrap_script
+  }
+}
+
 resource "kubernetes_service_v1" "mongodb" {
   metadata {
     name      = "mongodb"
@@ -242,4 +254,89 @@ resource "kubernetes_job_v1" "mongodb_bootstrap" {
   # deadlock rule. The Job's own bounded retry loop tolerates mongodb-0 not
   # existing yet.
   depends_on = [kubernetes_service_v1.mongodb]
+}
+
+resource "kubernetes_job_v1" "mongodb_application_bootstrap" {
+  metadata {
+    name      = "mongodb-application-bootstrap"
+    namespace = local.mongodb_namespace
+    labels = merge(local.mongodb_labels, {
+      "app.kubernetes.io/name" = "mongodb-application-bootstrap"
+    })
+  }
+
+  wait_for_completion = true
+
+  timeouts {
+    create = "20m"
+  }
+
+  spec {
+    backoff_limit              = 1
+    active_deadline_seconds    = 900
+    ttl_seconds_after_finished = 600
+
+    template {
+      metadata {
+        labels = merge(local.mongodb_labels, {
+          "app.kubernetes.io/name" = "mongodb-application-bootstrap"
+        })
+        annotations = {
+          "omnivise-iot/application-bootstrap-sha256" = sha256(var.mongodb_application_bootstrap_script)
+        }
+      }
+
+      spec {
+        restart_policy = "Never"
+
+        container {
+          name  = "bootstrap"
+          image = var.mongodb_image
+
+          command = [
+            "mongosh",
+            "--quiet",
+            "--host",
+            local.mongodb_member_host,
+            "--file",
+            "/bootstrap/mongo-init.js",
+          ]
+
+          env {
+            name  = "MONGO_INITDB_DATABASE"
+            value = local.mongo_database
+          }
+
+          volume_mount {
+            name       = "bootstrap-script"
+            mount_path = "/bootstrap"
+            read_only  = true
+          }
+
+          resources {
+            requests = {
+              cpu    = var.mongodb_bootstrap_cpu_request
+              memory = var.mongodb_bootstrap_memory_request
+            }
+            limits = {
+              cpu    = var.mongodb_bootstrap_cpu_limit
+              memory = var.mongodb_bootstrap_memory_limit
+            }
+          }
+        }
+
+        volume {
+          name = "bootstrap-script"
+
+          config_map {
+            name = kubernetes_config_map_v1.mongodb_application_bootstrap.metadata[0].name
+          }
+        }
+      }
+    }
+  }
+
+  depends_on = [
+    kubernetes_job_v1.mongodb_bootstrap,
+  ]
 }

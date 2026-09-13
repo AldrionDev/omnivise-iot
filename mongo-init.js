@@ -1,7 +1,5 @@
-// MongoDB seed / bootstrap script — run by the one-shot `mongo-seed` Compose
-// service once `mongodb` is healthy (replica set has a writable primary). It is
-// deliberately NOT a `/docker-entrypoint-initdb.d` script: those run before the
-// replica set is initiated, so every write there fails with "not primary".
+// MongoDB application seed / bootstrap script shared by Compose and Kubernetes.
+// It runs only after the replica set has a writable primary.
 //
 // Issue #70 domain cutover:
 //   * introduces a seeded, read-only `devices` registry (server-room topology);
@@ -10,12 +8,14 @@
 //
 // Bootstrap contract (fail-closed):
 //   * fresh state (both collections absent/empty)  -> perform the deterministic seed
+//   * legacy persistent state with no canonical
+//     Dashboard 2.0 seed slots                     -> upgrade additively in place
 //   * fully initialised existing state             -> validate, exit 0, do NOT reseed
 //   * partial / inconsistent / ambiguous state     -> print the reason, exit non-zero
 //
-// It never drops or reseeds a database that already holds data, and it never
-// silently accepts a half-initialised state. A clean re-cutover is an explicit
-// operator action: `docker compose down -v`.
+// Existing persistent readings are never dropped or rewritten during an
+// in-place upgrade, and a half-initialised or conflicting state is never
+// silently accepted.
 
 // The registry the seed produces. Existing-state validation requires exactly
 // these ids — no more, no fewer.
@@ -260,7 +260,9 @@ function indexKeyString(key) {
 
 function hasRequiredIndex(collection, wantedKey) {
   const wanted = indexKeyString(wantedKey);
-  return collection.getIndexes().some((ix) => indexKeyString(ix.key) === wanted);
+  return collection
+    .getIndexes()
+    .some((ix) => indexKeyString(ix.key) === wanted);
 }
 
 // Returns a list of human-readable reasons the current persisted state is not a
@@ -273,12 +275,18 @@ function completenessProblems() {
     .find({}, { _id: 1 })
     .toArray()
     .map((d) => d._id);
-  const missing = EXPECTED_DEVICE_IDS.filter((id) => actualIds.indexOf(id) === -1);
-  const unexpected = actualIds.filter((id) => EXPECTED_DEVICE_IDS.indexOf(id) === -1);
+  const missing = EXPECTED_DEVICE_IDS.filter(
+    (id) => actualIds.indexOf(id) === -1,
+  );
+  const unexpected = actualIds.filter(
+    (id) => EXPECTED_DEVICE_IDS.indexOf(id) === -1,
+  );
   if (actualIds.length !== EXPECTED_DEVICE_IDS.length) {
     problems.push(
-      "devices: expected exactly " + EXPECTED_DEVICE_IDS.length +
-        " entries, found " + actualIds.length,
+      "devices: expected exactly " +
+        EXPECTED_DEVICE_IDS.length +
+        " entries, found " +
+        actualIds.length,
     );
   }
   if (missing.length) {
@@ -298,7 +306,9 @@ function completenessProblems() {
     if (matches !== 1) {
       problems.push(
         "sensor_readings: expected exactly one seeded reading " +
-          EJSON.stringify(expected) + ", found " + matches,
+          EJSON.stringify(expected) +
+          ", found " +
+          matches,
       );
     }
   });
@@ -306,7 +316,9 @@ function completenessProblems() {
   // 3. sensor_readings: required indexes exist.
   for (const wanted of REQUIRED_READING_INDEXES) {
     if (!hasRequiredIndex(db.sensor_readings, wanted)) {
-      problems.push("sensor_readings: missing required index " + indexKeyString(wanted));
+      problems.push(
+        "sensor_readings: missing required index " + indexKeyString(wanted),
+      );
     }
   }
 
@@ -317,8 +329,8 @@ function reportAndExit(problems, context) {
   print("❌ " + context);
   problems.forEach((p) => print("   - " + p));
   print(
-    "   Refusing to touch persistent data. Fix the state, or reset the volume " +
-      "(`docker compose down -v`) to reseed from scratch.",
+    "   Refusing to mutate ambiguous persistent data. " +
+      "Inspect and repair the state explicitly before retrying bootstrap.",
   );
   quit(1);
 }
@@ -371,8 +383,10 @@ function alertCompletenessProblems() {
 
   if (actualIds.length !== expectedIds.length) {
     problems.push(
-      "alert_rules: expected exactly " + expectedIds.length +
-        " rules, found " + actualIds.length,
+      "alert_rules: expected exactly " +
+        expectedIds.length +
+        " rules, found " +
+        actualIds.length,
     );
   }
   if (missing.length) {
@@ -385,14 +399,18 @@ function alertCompletenessProblems() {
     const actual = actualRules.find((r) => r._id === expected._id);
     if (actual && !alertRuleEquals(expected, actual)) {
       problems.push(
-        "alert_rules: '" + expected._id + "' config differs from the approved seed",
+        "alert_rules: '" +
+          expected._id +
+          "' config differs from the approved seed",
       );
     }
   });
 
   for (const wanted of REQUIRED_ALERT_EVENT_INDEXES) {
     if (!alertEventsHasIndex(wanted)) {
-      problems.push("alert_events: missing required index " + indexKeyString(wanted));
+      problems.push(
+        "alert_events: missing required index " + indexKeyString(wanted),
+      );
     }
   }
 
@@ -402,7 +420,8 @@ function alertCompletenessProblems() {
       : 0;
   if (eventsCount > 0 && (missing.length || unexpected.length)) {
     problems.push(
-      "alert_events: " + eventsCount +
+      "alert_events: " +
+        eventsCount +
         " event(s) present while the alert_rules bootstrap is incomplete",
     );
   }
@@ -413,7 +432,9 @@ function alertCompletenessProblems() {
 function seedAlertSchema() {
   db.alert_rules.insertMany(EXPECTED_ALERT_RULES, { ordered: true });
   // Indexes LAST (see the section comment above).
-  REQUIRED_ALERT_EVENT_INDEXES.forEach((key) => db.alert_events.createIndex(key));
+  REQUIRED_ALERT_EVENT_INDEXES.forEach((key) =>
+    db.alert_events.createIndex(key),
+  );
 }
 
 // #94 ordering metadata is additive. Legacy alert documents deliberately stay
@@ -447,8 +468,13 @@ function alertSequenceBootstrap() {
     );
   }
   if (current.value < maxSequence) {
-    db.alert_sequences.updateOne({ _id: "global" }, { $set: { value: maxSequence } });
-    print("✅ alert sequence counter advanced to existing maximum " + maxSequence);
+    db.alert_sequences.updateOne(
+      { _id: "global" },
+      { $set: { value: maxSequence } },
+    );
+    print(
+      "✅ alert sequence counter advanced to existing maximum " + maxSequence,
+    );
   }
 }
 
@@ -461,26 +487,40 @@ function alertBootstrap() {
   ).length;
 
   const isAlertFresh =
-    rulesCount === 0 && !eventsExist && eventsCount === 0 && indexesPresent === 0;
+    rulesCount === 0 &&
+    !eventsExist &&
+    eventsCount === 0 &&
+    indexesPresent === 0;
 
   if (isAlertFresh) {
-    print("🌱 alert schema absent — seeding alert_rules and alert_events indexes");
+    print(
+      "🌱 alert schema absent — seeding alert_rules and alert_events indexes",
+    );
     seedAlertSchema();
 
     const problems = alertCompletenessProblems();
     if (problems.length) {
-      reportAndExit(problems, "alert seed post-condition failed (this should not happen)");
+      reportAndExit(
+        problems,
+        "alert seed post-condition failed (this should not happen)",
+      );
     }
 
     print(
-      "✅ alert schema seeded: " + db.alert_rules.countDocuments() + " rules, " +
-        REQUIRED_ALERT_EVENT_INDEXES.length + " alert_events indexes",
+      "✅ alert schema seeded: " +
+        db.alert_rules.countDocuments() +
+        " rules, " +
+        REQUIRED_ALERT_EVENT_INDEXES.length +
+        " alert_events indexes",
     );
     return;
   }
 
   print(
-    "🔎 alert schema present (" + rulesCount + " rules, " + eventsCount +
+    "🔎 alert schema present (" +
+      rulesCount +
+      " rules, " +
+      eventsCount +
       " events) — validating completeness, no reseed",
   );
   const problems = alertCompletenessProblems();
@@ -506,13 +546,51 @@ function seedFresh() {
   db.sensor_readings.createIndex({ timestamp: -1 });
 }
 
+// Issue #105: in-place upgrade for a pre-Dashboard-2.0 persistent database.
+//
+// A legacy persistent database may already contain historical sensor readings
+// while having no Dashboard 2.0 device registry yet. That state is safe to
+// upgrade only when NONE of the deterministic canonical seed slots are already
+// present. A seed slot is identified by deviceId + channel + timestamp, so a
+// mutated or duplicated canonical reading remains ambiguous and fails closed.
+//
+// Any partially-present canonical seed remains ambiguous and is handled by the
+// normal fail-closed completeness validation below.
+function canonicalSeedSlotCount() {
+  return readings.reduce(
+    (count, expected) =>
+      count +
+      db.sensor_readings.countDocuments({
+        deviceId: expected.deviceId,
+        channel: expected.channel,
+        timestamp: expected.timestamp,
+      }),
+    0,
+  );
+}
+
+function upgradeLegacyPersistentState() {
+  // Additive only: historical readings are never dropped or rewritten.
+  db.sensor_readings.insertMany(readings, { ordered: true });
+  db.devices.insertMany(devices, { ordered: true });
+
+  // Indexes LAST, matching the fresh-seed crash-safety ordering.
+  REQUIRED_READING_INDEXES.forEach((key) => {
+    db.sensor_readings.createIndex(key);
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Decision
 // ---------------------------------------------------------------------------
 
 const devicesCount = db.devices.countDocuments();
 const readingsCount = db.sensor_readings.countDocuments();
+const canonicalSeedSlotsCount = canonicalSeedSlotCount();
+
 const isFresh = devicesCount === 0 && readingsCount === 0;
+const isLegacyPersistent =
+  devicesCount === 0 && readingsCount > 0 && canonicalSeedSlotsCount === 0;
 
 if (isFresh) {
   print("🌱 fresh database — performing deterministic seed");
@@ -520,16 +598,46 @@ if (isFresh) {
 
   const problems = completenessProblems();
   if (problems.length) {
-    reportAndExit(problems, "seed post-condition failed (this should not happen)");
+    reportAndExit(
+      problems,
+      "seed post-condition failed (this should not happen)",
+    );
   }
 
   print(
-    "✅ seeded: " + db.devices.countDocuments() + " devices, " +
-      db.sensor_readings.countDocuments() + " readings, required indexes present",
+    "✅ seeded: " +
+      db.devices.countDocuments() +
+      " devices, " +
+      db.sensor_readings.countDocuments() +
+      " readings, required indexes present",
+  );
+} else if (isLegacyPersistent) {
+  print(
+    "⬆️ legacy persistent database — adding Dashboard 2.0 bootstrap state " +
+      "without deleting historical readings",
+  );
+
+  upgradeLegacyPersistentState();
+
+  const problems = completenessProblems();
+  if (problems.length) {
+    reportAndExit(
+      problems,
+      "legacy persistent upgrade post-condition failed (this should not happen)",
+    );
+  }
+
+  print(
+    "✅ legacy persistent database upgraded: " +
+      db.devices.countDocuments() +
+      " devices, historical readings preserved",
   );
 } else {
   print(
-    "🔎 existing database (" + devicesCount + " devices, " + readingsCount +
+    "🔎 existing database (" +
+      devicesCount +
+      " devices, " +
+      readingsCount +
       " readings) — validating completeness, no reseed",
   );
   const problems = completenessProblems();
