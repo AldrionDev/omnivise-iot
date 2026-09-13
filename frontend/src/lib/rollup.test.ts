@@ -70,6 +70,44 @@ describe('computeStatusRollup', () => {
     expect(computeStatusRollup(devices, alerts)).toEqual({ ok: 1, degraded: 1, critical: 1 })
   })
 
+  it('recomputes an overlapping warning and UPS critical lifecycle by affected device', () => {
+    const devices = [device({ deviceId: 'rack-a1' }), device({ deviceId: 'ups-1', kind: 'ups' })]
+    const warning = alert({
+      id: 'rack-warning',
+      ruleId: 'rack-intake-temp-high',
+      deviceId: 'rack-a1',
+      channel: 'intake_temp',
+      severity: 'warning',
+    })
+    const inputVoltage = alert({
+      id: 'ups-voltage',
+      ruleId: 'ups-input-voltage-low',
+      deviceId: 'ups-1',
+      channel: 'input_voltage',
+      severity: 'critical',
+    })
+    const battery = alert({
+      id: 'ups-battery',
+      ruleId: 'ups-battery-low',
+      deviceId: 'ups-1',
+      channel: 'battery_pct',
+      severity: 'critical',
+    })
+
+    expect(computeStatusRollup(devices, [warning, inputVoltage, battery])).toEqual({
+      ok: 0,
+      degraded: 1,
+      critical: 1,
+    })
+    expect(computeStatusRollup(devices, [inputVoltage, battery])).toEqual({
+      ok: 1,
+      degraded: 0,
+      critical: 1,
+    })
+    expect(computeStatusRollup(devices, [battery])).toEqual({ ok: 1, degraded: 0, critical: 1 })
+    expect(computeStatusRollup(devices, [])).toEqual({ ok: 2, degraded: 0, critical: 0 })
+  })
+
   it('returns all zeros for an empty fleet', () => {
     expect(computeStatusRollup([], [])).toEqual({ ok: 0, degraded: 0, critical: 0 })
   })

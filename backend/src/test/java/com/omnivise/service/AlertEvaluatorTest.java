@@ -165,6 +165,37 @@ class AlertEvaluatorTest {
     }
 
     @Test
+    void overlappingWarningAndCriticalLifecyclesRemainIndependentAndDeduplicated() {
+        AlertEvaluator evaluator = evaluator(INTAKE_HIGH, VOLTAGE_LOW);
+
+        evaluator.evaluate(reading("rack-a1", "intake_temp", 33.0));
+        evaluator.evaluate(reading("rack-a1", "intake_temp", 34.0));
+        evaluator.evaluate(reading("ups-1", "input_voltage", 170.0));
+        evaluator.evaluate(reading("ups-1", "input_voltage", 160.0));
+        evaluator.evaluate(reading("rack-a1", "intake_temp", 26.0));
+        evaluator.evaluate(reading("ups-1", "input_voltage", 150.0));
+        evaluator.evaluate(reading("ups-1", "input_voltage", 220.0));
+
+        assertEquals(List.of(1L, 2L, 3L, 4L),
+                webhook.events.stream().map(AlertEvent::sequence).toList());
+        assertEquals(List.of(INTAKE_HIGH.ruleId(), VOLTAGE_LOW.ruleId(),
+                        INTAKE_HIGH.ruleId(), VOLTAGE_LOW.ruleId()),
+                webhook.events.stream().map(AlertEvent::ruleId).toList());
+        assertEquals(List.of("rack-a1", "ups-1", "rack-a1", "ups-1"),
+                webhook.events.stream().map(AlertEvent::deviceId).toList());
+        assertEquals(List.of(AlertEvent.STATE_FIRING, AlertEvent.STATE_FIRING,
+                        AlertEvent.STATE_RESOLVED, AlertEvent.STATE_RESOLVED),
+                webhook.events.stream().map(AlertEvent::state).toList());
+        assertEquals(webhook.events.get(0).id(), webhook.events.get(2).id());
+        assertEquals(webhook.events.get(1).id(), webhook.events.get(3).id());
+        assertNotEquals(webhook.events.get(0).id(), webhook.events.get(1).id());
+        verify(alertService, times(2)).insertFiring(any());
+        verify(alertService, times(3)).updateLastValue(any(), anyDouble());
+        verify(alertService, times(2)).resolve(any(), anyDouble(), anyString());
+        verify(wsHandler, times(4)).broadcast(any(AlertMessage.class));
+    }
+
+    @Test
     void throwingWebhookDoesNotUndoCommittedStateOrBreakEvaluation() {
         AlertWebhook throwing = event -> {
             throw new IllegalStateException("unavailable");
