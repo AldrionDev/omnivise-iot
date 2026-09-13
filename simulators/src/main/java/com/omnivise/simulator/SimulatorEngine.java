@@ -419,12 +419,13 @@ public final class SimulatorEngine {
         List<String[]> targets = new ArrayList<>();
         for (Device device : registry) {
             for (Channel channel : device.channels()) {
-                if (channel.name().equals("battery_pct") || channel.name().equals("door_contact")) {
-                    continue;
-                }
-                switch (channel.unit()) {
-                    case "°C", "%", "W", "rpm", "A" -> targets.add(new String[] {device.deviceId(), channel.name()});
-                    default -> { /* voltage etc. is not a "breach high" target */ }
+                boolean canonicalWarningTarget =
+                        ("rack".equals(device.kind())
+                                && ("intake_temp".equals(channel.name()) || "humidity".equals(channel.name())))
+                        || ("crac".equals(device.kind()) && "return_temp".equals(channel.name()));
+
+                if (canonicalWarningTarget) {
+                    targets.add(new String[] {device.deviceId(), channel.name()});
                 }
             }
         }
