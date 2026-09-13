@@ -29,6 +29,17 @@ variable "simulator_anomaly_mode" {
   description = "Enable deterministic simulator anomaly injection."
 }
 
+variable "simulator_interval_seconds" {
+  type        = number
+  default     = 5
+  description = "Simulated seconds between sensor simulator ticks."
+
+  validation {
+    condition     = var.simulator_interval_seconds >= 1 && floor(var.simulator_interval_seconds) == var.simulator_interval_seconds
+    error_message = "simulator_interval_seconds must be an integer >= 1."
+  }
+}
+
 variable "simulator_anomaly_every_ticks" {
   type        = number
   default     = 60
@@ -48,6 +59,36 @@ variable "simulator_anomaly_duration_ticks" {
   validation {
     condition     = var.simulator_anomaly_duration_ticks >= 1 && floor(var.simulator_anomaly_duration_ticks) == var.simulator_anomaly_duration_ticks
     error_message = "simulator_anomaly_duration_ticks must be an integer >= 1."
+  }
+}
+
+variable "simulator_anomaly_recovery_ticks" {
+  type        = number
+  default     = null
+  nullable    = true
+  description = "Length of the simulator anomaly RECOVERY window in ticks. Null derives max(2, duration / 2)."
+
+  validation {
+    condition = var.simulator_anomaly_recovery_ticks == null ? true : (
+      var.simulator_anomaly_recovery_ticks >= 1 &&
+      floor(var.simulator_anomaly_recovery_ticks) == var.simulator_anomaly_recovery_ticks
+    )
+    error_message = "simulator_anomaly_recovery_ticks must be null or an integer >= 1."
+  }
+}
+
+variable "simulator_max_concurrent_anomalies" {
+  type        = number
+  default     = 1
+  description = "Maximum simultaneous simulator anomaly ACTIVE/RECOVERY instances."
+
+  validation {
+    condition = (
+      var.simulator_max_concurrent_anomalies >= 1 &&
+      var.simulator_max_concurrent_anomalies <= 2 &&
+      floor(var.simulator_max_concurrent_anomalies) == var.simulator_max_concurrent_anomalies
+    )
+    error_message = "simulator_max_concurrent_anomalies must be an integer from 1 through 2."
   }
 }
 

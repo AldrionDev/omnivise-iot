@@ -72,6 +72,13 @@ class SimulatorEngineTest {
                 scenarios, START_EPOCH_MILLIS);
     }
 
+    private static Config anomalyConfig(
+            long seed, int every, int duration, int recovery,
+            int maxConcurrent, List<String> scenarios) {
+        return new Config(5, seed, true, every, duration, recovery, maxConcurrent,
+                scenarios, START_EPOCH_MILLIS);
+    }
+
     /** Physically sensible envelopes for the continuous channels, keyed by "deviceId/channel". */
     private static final Map<String, double[]> BOUNDS = Map.ofEntries(
             Map.entry("rack-a1/intake_temp", new double[] {12.0, 32.0}),
@@ -291,10 +298,7 @@ class SimulatorEngineTest {
         }
     }
 
-    // --- Config validation (issue #71 finding B4) --------------------------------
-    //
-    // INTERVAL_SECONDS must be >= 1. Anomaly bounds are enforced only when
-    // ANOMALY_MODE is on (otherwise the values are inert).
+    // --- Config validation --------------------------------------------------------
 
     private static Config cfg(int intervalSeconds, boolean anomalyMode, int every, int duration) {
         return new Config(intervalSeconds, 42L, anomalyMode, every, duration, 2,
@@ -313,28 +317,55 @@ class SimulatorEngineTest {
     }
 
     @Test
-    void configAcceptsCadenceThatCanOverlapActiveAndRecoveryWindows() {
-        assertDoesNotThrow(() -> cfg(5, true, 2, 6));
+    void omittedRecoveryDerivesTheLegacyValue() {
+        Config config = cfg(5, false, 60, 6);
+
+        assertEquals(3, config.anomalyRecoveryTicks());
+        assertEquals(2, new Config(5, 42L, false, 60, 3, 1,
+                List.of("breach_high"), START_EPOCH_MILLIS).anomalyRecoveryTicks());
+    }
+
+    @Test
+    void explicitRecoveryIsRetained() {
+        Config config = new Config(5, 42L, false, 60, 6, 7, 1,
+                List.of("breach_high"), START_EPOCH_MILLIS);
+
+        assertEquals(7, config.anomalyRecoveryTicks());
+    }
+
+    @Test
+    void defaultsUseCompatibilityRecoveryAndConcurrencyOne() {
+        Config defaults = Config.defaults(42L, START_EPOCH_MILLIS);
+
+        assertEquals(3, defaults.anomalyRecoveryTicks());
+        assertEquals(1, defaults.maxConcurrentAnomalies());
     }
 
     @Test
     void configRejectsConcurrencyOutsideTheSupportedBound() {
         assertThrows(IllegalArgumentException.class, () -> new Config(
-                5, 42L, true, 4, 3, 0, List.of("breach_high"), START_EPOCH_MILLIS));
+                5, 42L, false, 4, 3, 0, List.of("breach_high"), START_EPOCH_MILLIS));
         assertThrows(IllegalArgumentException.class, () -> new Config(
-                5, 42L, true, 4, 3, 3, List.of("breach_high"), START_EPOCH_MILLIS));
+                5, 42L, false, 4, 3, 3, List.of("breach_high"), START_EPOCH_MILLIS));
     }
 
     @Test
-    void configRejectsZeroDurationWhenAnomalyModeIsOn() {
+    void configRejectsZeroDurationEvenWhenAnomalyModeIsOff() {
         IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
-                () -> cfg(5, true, 60, 0));
+                () -> cfg(5, false, 60, 0));
         assertTrue(e.getMessage().contains("ANOMALY_DURATION_TICKS"), e.getMessage());
     }
 
     @Test
-    void configRejectsZeroCadenceWhenAnomalyModeIsOn() {
-        assertThrows(IllegalArgumentException.class, () -> cfg(5, true, 0, 6));
+    void configRejectsZeroCadenceEvenWhenAnomalyModeIsOff() {
+        assertThrows(IllegalArgumentException.class, () -> cfg(5, false, 0, 6));
+    }
+
+    @Test
+    void configRejectsZeroRecoveryEvenWhenAnomalyModeIsOff() {
+        assertThrows(IllegalArgumentException.class, () -> new Config(
+                5, 42L, false, 60, 6, 0, 1,
+                List.of("breach_high"), START_EPOCH_MILLIS));
     }
 
     @Test
@@ -350,17 +381,35 @@ class SimulatorEngineTest {
     }
 
     @Test
-    void anomalyBoundsAreNotCheckedAndCauseNoRuntimeFailureWhenAnomalyModeIsOff() {
-        // With ANOMALY_MODE off the cadence/duration values are inert: construction
-        // is allowed and the loop never divides by anomalyEveryTicks.
-        Config config = assertDoesNotThrow(() -> cfg(5, false, 0, 0));
-        SimulatorEngine engine = engine(config);
-        for (int t = 0; t < 300; t++) {
-            final long tick = t;
-            List<Reading> readings = assertDoesNotThrow(() -> engine.tick(tick)); // no ArithmeticException
-            assertFalse(readings.isEmpty());
-            assertTrue(engine.currentAnomalies().isEmpty());
-        }
+    void configAcceptsCapacityEquality() {
+        assertDoesNotThrow(() -> anomalyConfig(
+                42L, 12, 18, 6, 2, List.of("breach_high", "mains_loss")));
+    }
+
+    @Test
+    void configRejectsEnabledLifecycleOverCapacity() {
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                () -> anomalyConfig(42L, 12, 19, 6, 2, List.of("breach_high")));
+
+        assertTrue(error.getMessage().contains("ANOMALY_EVERY_TICKS * MAX_CONCURRENT_ANOMALIES"));
+    }
+
+    @Test
+    void capacityArithmeticWidensBeforeAdditionAndMultiplication() {
+        assertDoesNotThrow(() -> anomalyConfig(
+                42L, Integer.MAX_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE,
+                2, List.of("breach_high")));
+        assertThrows(IllegalArgumentException.class, () -> anomalyConfig(
+                42L, Integer.MAX_VALUE - 1, Integer.MAX_VALUE, Integer.MAX_VALUE,
+                2, List.of("breach_high")));
+    }
+
+    @Test
+    void omittedRecoveryRetainsLegacyCapacitySemantics() {
+        assertDoesNotThrow(() -> anomalyConfig(
+                42L, 5, 6, 2, List.of("breach_high")));
+        assertThrows(IllegalArgumentException.class, () -> anomalyConfig(
+                42L, 4, 6, 2, List.of("breach_high")));
     }
 
     /** One anomaly scenario at the documented default cadence (onset at tick 60). */
@@ -385,43 +434,55 @@ class SimulatorEngineTest {
     }
 
     @Test
+    void lifecycleUsesExplicitRecoveryTicks() {
+        SimulatorEngine engine = engine(anomalyConfig(
+                12L, 12, 3, 7, 1, List.of("breach_high")));
+
+        for (int tick = 0; tick <= 22; tick++) {
+            engine.tick(tick);
+            List<AnomalyInfo> anomalies = engine.currentAnomalies();
+            if (tick < 12 || tick >= 22) {
+                assertTrue(anomalies.isEmpty(), "no anomaly at tick " + tick);
+            } else {
+                assertEquals(tick < 15 ? "ACTIVE" : "RECOVERY",
+                        anomalies.get(0).phase(), "phase at tick " + tick);
+            }
+        }
+    }
+
+    @Test
     void supportsTwoDisjointInstancesAndCountsRecoveryTowardTheLimit() {
         SimulatorEngine engine = engine(anomalyConfig(
-                42L, 2, 3, 2, List.of("breach_high", "mains_loss")));
+                42L, 3, 3, 3, 2, List.of("breach_high", "mains_loss")));
 
         List<Reading> overlappingReadings = List.of();
-        for (int tick = 0; tick <= 4; tick++) {
+        for (int tick = 0; tick <= 6; tick++) {
             overlappingReadings = engine.tick(tick);
         }
-        assertEquals(List.of("ACTIVE", "ACTIVE"),
+        assertEquals(List.of("RECOVERY", "ACTIVE"),
                 engine.currentAnomalies().stream().map(AnomalyInfo::phase).toList());
+        assertEquals(List.of("breach_high", "mains_loss"),
+                engine.currentAnomalies().stream().map(AnomalyInfo::scenario).toList());
         assertEquals(20, overlappingReadings.size());
         assertEquals(20, overlappingReadings.stream()
                 .map(reading -> reading.deviceId() + "/" + reading.channel())
                 .distinct()
                 .count(), "overlapping anomalies cannot duplicate emitted channels");
 
-        engine.tick(5);
-        engine.tick(6);
+        engine.tick(7);
+        engine.tick(8);
+        engine.tick(9);
 
         List<AnomalyInfo> anomalies = engine.currentAnomalies();
-        assertEquals(2, anomalies.size(), "the scheduled tick is skipped while both slots are occupied");
-        assertEquals(List.of(1L, 2L), anomalies.stream().map(AnomalyInfo::id).toList());
+        assertEquals(2, anomalies.size());
+        assertEquals(List.of(2L, 3L), anomalies.stream().map(AnomalyInfo::id).toList(),
+                "every scheduled onset is admitted at capacity equality");
         assertEquals(List.of("RECOVERY", "ACTIVE"), anomalies.stream().map(AnomalyInfo::phase).toList());
-        assertEquals(List.of("breach_high", "mains_loss"),
+        assertEquals(List.of("mains_loss", "breach_high"),
                 anomalies.stream().map(AnomalyInfo::scenario).toList());
         assertFalse(anomalies.get(0).deviceId().equals(anomalies.get(1).deviceId())
                         && anomalies.get(0).channel().equals(anomalies.get(1).channel()),
                 "concurrent display targets must be disjoint");
-
-        engine.tick(7);
-        engine.tick(8);
-        anomalies = engine.currentAnomalies();
-        assertEquals(List.of(2L, 3L), anomalies.stream().map(AnomalyInfo::id).toList(),
-                "a skipped admission must not consume an ID");
-        assertEquals(List.of("mains_loss", "breach_high"),
-                anomalies.stream().map(AnomalyInfo::scenario).toList(),
-                "a skipped admission must not advance the scenario cursor");
     }
 
     @Test
@@ -441,16 +502,20 @@ class SimulatorEngineTest {
 
     @Test
     void concurrentBreachesSelectDeterministicAlternativeDisjointTargets() {
-        Config config = anomalyConfig(17L, 1, 2, 2, List.of("breach_high"));
+        Config config = anomalyConfig(17L, 2, 2, 2, 2, List.of("breach_high"));
         SimulatorEngine first = engine(config);
         SimulatorEngine second = engine(config);
 
         first.tick(0);
         second.tick(0);
-        List<Reading> firstReadings = first.tick(1);
-        List<Reading> secondReadings = second.tick(1);
-        firstReadings = first.tick(2);
-        secondReadings = second.tick(2);
+        first.tick(1);
+        second.tick(1);
+        first.tick(2);
+        second.tick(2);
+        first.tick(3);
+        second.tick(3);
+        List<Reading> firstReadings = first.tick(4);
+        List<Reading> secondReadings = second.tick(4);
 
         List<AnomalyInfo> firstSnapshot = first.currentAnomalies();
         assertEquals(firstSnapshot, second.currentAnomalies());
@@ -467,7 +532,7 @@ class SimulatorEngineTest {
                 new Channel("battery_pct", "%"),
                 new Channel("input_voltage", "V"))));
         SimulatorEngine engine = new SimulatorEngine(registry,
-                anomalyConfig(17L, 1, 2, 2, List.of("breach_high")));
+                anomalyConfig(17L, 2, 2, 2, 2, List.of("breach_high")));
 
         for (int tick = 0; tick < 10; tick++) {
             List<Reading> readings = engine.tick(tick);
@@ -478,7 +543,8 @@ class SimulatorEngineTest {
 
     @Test
     void currentAnomaliesIsImmutableAndDoesNotChangeAfterLaterTicks() {
-        SimulatorEngine engine = engine(anomalyConfig(22L, 2, 3, 2, List.of("breach_high")));
+        SimulatorEngine engine = engine(anomalyConfig(
+                22L, 2, 3, 1, 2, List.of("breach_high")));
         engine.tick(0);
         engine.tick(1);
         engine.tick(2);
@@ -497,7 +563,7 @@ class SimulatorEngineTest {
     @Test
     void identicalInputsProduceIdenticalConcurrentSnapshotsAndReadings() {
         Config config = anomalyConfig(
-                81L, 2, 3, 2, List.of("breach_high", "mains_loss"));
+                81L, 2, 3, 1, 2, List.of("breach_high", "mains_loss"));
         SimulatorEngine first = engine(config);
         SimulatorEngine second = engine(config);
 
@@ -573,17 +639,18 @@ class SimulatorEngineTest {
                 new Channel("battery_pct", "%"),
                 new Channel("input_voltage", "V"))));
         SimulatorEngine engine = new SimulatorEngine(registry,
-                anomalyConfig(31L, 1, 2, 2, List.of("mains_loss")));
+                anomalyConfig(31L, 2, 2, 2, 2, List.of("mains_loss")));
 
         engine.tick(0);
-        for (int tick = 1; tick <= 4; tick++) {
+        engine.tick(1);
+        for (int tick = 2; tick <= 5; tick++) {
             List<Reading> readings = engine.tick(tick);
             assertEquals(1, engine.currentAnomalies().size(),
                     "the complete UPS footprint remains reserved at tick " + tick);
             assertEquals(1L, engine.currentAnomalies().get(0).id(),
                     "colliding scheduled starts do not consume IDs");
-            if (tick <= 2) {
-                double expectedBattery = 100.0 - tick * 2.5;
+            if (tick <= 3) {
+                double expectedBattery = 100.0 - (tick - 1) * 2.5;
                 for (String ups : List.of("ups-1", "ups-2")) {
                     assertEquals(expectedBattery, valueOf(readings, ups, "battery_pct"));
                     assertTrue(valueOf(readings, ups, "input_voltage") < 10.0,
@@ -592,7 +659,7 @@ class SimulatorEngineTest {
             }
         }
 
-        List<Reading> replacementTick = engine.tick(5);
+        List<Reading> replacementTick = engine.tick(6);
         assertEquals(2L, engine.currentAnomalies().get(0).id(),
                 "release occurs before the colliding scenario is admitted on the deadline tick");
         assertEquals(94.5, valueOf(replacementTick, "ups-1", "battery_pct"),

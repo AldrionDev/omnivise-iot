@@ -6,10 +6,13 @@ module "application" {
   frontend_image_ref  = var.frontend_image_ref
   simulator_image_ref = var.simulator_image_ref
 
-  simulator_anomaly_mode           = true
-  simulator_anomaly_every_ticks    = 60
-  simulator_anomaly_duration_ticks = 6
-  simulator_seed                   = 42
+  simulator_interval_seconds         = 5
+  simulator_anomaly_mode             = true
+  simulator_anomaly_every_ticks      = 12
+  simulator_anomaly_duration_ticks   = 18
+  simulator_anomaly_recovery_ticks   = 6
+  simulator_max_concurrent_anomalies = 2
+  simulator_seed                     = 42
 
   mongodb_image                        = local.mongodb_image
   mongodb_application_bootstrap_script = file("${path.module}/../../mongo-init.js")
