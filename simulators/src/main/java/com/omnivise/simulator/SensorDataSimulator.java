@@ -67,7 +67,7 @@ public class SensorDataSimulator {
         Config config;
         try {
             config = new Config(intervalSeconds, seed, anomalyMode,
-                    anomalyEveryTicks, anomalyDurationTicks,
+                    anomalyEveryTicks, anomalyDurationTicks, 2,
                     List.of("breach_high", "mains_loss"), startMillis);
         } catch (IllegalArgumentException e) {
             System.err.println("❌ Invalid configuration: " + e.getMessage());
@@ -145,8 +145,11 @@ public class SensorDataSimulator {
             try {
                 List<Reading> batch = engine.tick(tick);
                 sink.accept(batch);
-                engine.currentAnomaly().ifPresent(a -> System.out.printf(
-                        "  ⚠️  anomaly %s [%s] %s/%s%n", a.scenario(), a.phase(), a.deviceId(), a.channel()));
+                for (SimulatorEngine.AnomalyInfo anomaly : engine.currentAnomalies()) {
+                    System.out.printf("  ⚠️  anomaly #%d %s [%s] %s/%s%n",
+                            anomaly.id(), anomaly.scenario(), anomaly.phase(),
+                            anomaly.deviceId(), anomaly.channel());
+                }
                 System.out.printf("[tick %d] ✅ inserted %d readings%n", tick, batch.size());
 
             } catch (Exception e) {

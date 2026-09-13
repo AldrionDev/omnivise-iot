@@ -8,9 +8,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
 import org.junit.jupiter.api.Test;
 
@@ -64,6 +64,12 @@ class SimulatorEngineTest {
 
     private static SimulatorEngine engine(Config config) {
         return new SimulatorEngine(serverRoomRegistry(), config);
+    }
+
+    private static Config anomalyConfig(
+            long seed, int every, int duration, int maxConcurrent, List<String> scenarios) {
+        return new Config(5, seed, true, every, duration, maxConcurrent,
+                scenarios, START_EPOCH_MILLIS);
     }
 
     /** Physically sensible envelopes for the continuous channels, keyed by "deviceId/channel". */
@@ -280,49 +286,43 @@ class SimulatorEngineTest {
         SimulatorEngine engine = engine(Config.defaults(1L, START_EPOCH_MILLIS));
         for (int i = 0; i < 1_000; i++) {
             engine.tick(i);
-            assertTrue(engine.currentAnomaly().isEmpty(), "no anomaly at tick " + i + " with ANOMALY_MODE off");
+            assertTrue(engine.currentAnomalies().isEmpty(),
+                    "no anomaly at tick " + i + " with ANOMALY_MODE off");
         }
     }
 
     // --- Config validation (issue #71 finding B4) --------------------------------
     //
-    // recoveryTicks = max(2, duration / 2). A configured cadence can only hold
-    // when the next onset lands in NORMAL, i.e. every > duration + recoveryTicks.
     // INTERVAL_SECONDS must be >= 1. Anomaly bounds are enforced only when
     // ANOMALY_MODE is on (otherwise the values are inert).
 
     private static Config cfg(int intervalSeconds, boolean anomalyMode, int every, int duration) {
-        return new Config(intervalSeconds, 42L, anomalyMode, every, duration,
+        return new Config(intervalSeconds, 42L, anomalyMode, every, duration, 2,
                 List.of("breach_high", "mains_loss"), START_EPOCH_MILLIS);
     }
 
     @Test
     void configAcceptsTheDocumentedDefaults() {
         assertDoesNotThrow(() -> Config.defaults(42L, START_EPOCH_MILLIS));
-        assertDoesNotThrow(() -> cfg(5, true, 60, 6)); // 60 > 6 + max(2,3) = 9
+        assertDoesNotThrow(() -> cfg(5, true, 60, 6));
     }
 
     @Test
     void configAcceptsAValidNonDefaultCadence() {
-        assertDoesNotThrow(() -> cfg(5, true, 10, 3)); // 10 > 3 + max(2,1) = 5
+        assertDoesNotThrow(() -> cfg(5, true, 10, 3));
     }
 
     @Test
-    void configRejectsCadenceEqualToDurationPlusRecovery() {
-        // duration 3 -> recovery max(2,1)=2 -> boundary 5; every == 5 must be rejected.
-        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
-                () -> cfg(5, true, 5, 3));
-        assertTrue(e.getMessage().contains("ANOMALY_EVERY_TICKS"), e.getMessage());
-        // duration 6 -> recovery max(2,3)=3 -> boundary 9; every == 9 must be rejected.
-        assertThrows(IllegalArgumentException.class, () -> cfg(5, true, 9, 6));
-        // one past the boundary is fine.
-        assertDoesNotThrow(() -> cfg(5, true, 10, 6));
+    void configAcceptsCadenceThatCanOverlapActiveAndRecoveryWindows() {
+        assertDoesNotThrow(() -> cfg(5, true, 2, 6));
     }
 
     @Test
-    void configRejectsCadenceSmallerThanDurationPlusRecovery() {
-        assertThrows(IllegalArgumentException.class, () -> cfg(5, true, 4, 3));
-        assertThrows(IllegalArgumentException.class, () -> cfg(5, true, 8, 6)); // 6 + max(2,3) = 9
+    void configRejectsConcurrencyOutsideTheSupportedBound() {
+        assertThrows(IllegalArgumentException.class, () -> new Config(
+                5, 42L, true, 4, 3, 0, List.of("breach_high"), START_EPOCH_MILLIS));
+        assertThrows(IllegalArgumentException.class, () -> new Config(
+                5, 42L, true, 4, 3, 3, List.of("breach_high"), START_EPOCH_MILLIS));
     }
 
     @Test
@@ -359,13 +359,245 @@ class SimulatorEngineTest {
             final long tick = t;
             List<Reading> readings = assertDoesNotThrow(() -> engine.tick(tick)); // no ArithmeticException
             assertFalse(readings.isEmpty());
-            assertTrue(engine.currentAnomaly().isEmpty());
+            assertTrue(engine.currentAnomalies().isEmpty());
         }
     }
 
     /** One anomaly scenario at the documented default cadence (onset at tick 60). */
     private static Config anomalyConfig(long seed, String scenario) {
-        return new Config(5, seed, true, 60, 6, List.of(scenario), START_EPOCH_MILLIS);
+        return anomalyConfig(seed, 60, 6, 2, List.of(scenario));
+    }
+
+    @Test
+    void lifecycleUsesExactActiveAndRecoveryHalfOpenWindows() {
+        SimulatorEngine engine = engine(anomalyConfig(12L, 10, 3, 2, List.of("breach_high")));
+
+        for (int tick = 0; tick <= 15; tick++) {
+            engine.tick(tick);
+            List<AnomalyInfo> anomalies = engine.currentAnomalies();
+            if (tick < 10 || tick >= 15) {
+                assertTrue(anomalies.isEmpty(), "no anomaly at tick " + tick);
+            } else {
+                String expectedPhase = tick < 13 ? "ACTIVE" : "RECOVERY";
+                assertEquals(expectedPhase, anomalies.get(0).phase(), "phase at tick " + tick);
+            }
+        }
+    }
+
+    @Test
+    void supportsTwoDisjointInstancesAndCountsRecoveryTowardTheLimit() {
+        SimulatorEngine engine = engine(anomalyConfig(
+                42L, 2, 3, 2, List.of("breach_high", "mains_loss")));
+
+        List<Reading> overlappingReadings = List.of();
+        for (int tick = 0; tick <= 4; tick++) {
+            overlappingReadings = engine.tick(tick);
+        }
+        assertEquals(List.of("ACTIVE", "ACTIVE"),
+                engine.currentAnomalies().stream().map(AnomalyInfo::phase).toList());
+        assertEquals(20, overlappingReadings.size());
+        assertEquals(20, overlappingReadings.stream()
+                .map(reading -> reading.deviceId() + "/" + reading.channel())
+                .distinct()
+                .count(), "overlapping anomalies cannot duplicate emitted channels");
+
+        engine.tick(5);
+        engine.tick(6);
+
+        List<AnomalyInfo> anomalies = engine.currentAnomalies();
+        assertEquals(2, anomalies.size(), "the scheduled tick is skipped while both slots are occupied");
+        assertEquals(List.of(1L, 2L), anomalies.stream().map(AnomalyInfo::id).toList());
+        assertEquals(List.of("RECOVERY", "ACTIVE"), anomalies.stream().map(AnomalyInfo::phase).toList());
+        assertEquals(List.of("breach_high", "mains_loss"),
+                anomalies.stream().map(AnomalyInfo::scenario).toList());
+        assertFalse(anomalies.get(0).deviceId().equals(anomalies.get(1).deviceId())
+                        && anomalies.get(0).channel().equals(anomalies.get(1).channel()),
+                "concurrent display targets must be disjoint");
+
+        engine.tick(7);
+        engine.tick(8);
+        anomalies = engine.currentAnomalies();
+        assertEquals(List.of(2L, 3L), anomalies.stream().map(AnomalyInfo::id).toList(),
+                "a skipped admission must not consume an ID");
+        assertEquals(List.of("mains_loss", "breach_high"),
+                anomalies.stream().map(AnomalyInfo::scenario).toList(),
+                "a skipped admission must not advance the scenario cursor");
+    }
+
+    @Test
+    void releasesCompletedInstanceBeforeAdmissionOnTheSameTick() {
+        SimulatorEngine engine = engine(anomalyConfig(9L, 5, 3, 1, List.of("breach_high")));
+
+        for (int tick = 0; tick <= 10; tick++) {
+            engine.tick(tick);
+        }
+
+        List<AnomalyInfo> anomalies = engine.currentAnomalies();
+        assertEquals(1, anomalies.size());
+        assertEquals(2L, anomalies.get(0).id());
+        assertEquals("ACTIVE", anomalies.get(0).phase(),
+                "the replacement starts when the previous recovery deadline is reached");
+    }
+
+    @Test
+    void concurrentBreachesSelectDeterministicAlternativeDisjointTargets() {
+        Config config = anomalyConfig(17L, 1, 2, 2, List.of("breach_high"));
+        SimulatorEngine first = engine(config);
+        SimulatorEngine second = engine(config);
+
+        first.tick(0);
+        second.tick(0);
+        List<Reading> firstReadings = first.tick(1);
+        List<Reading> secondReadings = second.tick(1);
+        firstReadings = first.tick(2);
+        secondReadings = second.tick(2);
+
+        List<AnomalyInfo> firstSnapshot = first.currentAnomalies();
+        assertEquals(firstSnapshot, second.currentAnomalies());
+        assertEquals(firstReadings, secondReadings);
+        assertEquals(2, firstSnapshot.size());
+        assertFalse(firstSnapshot.get(0).deviceId().equals(firstSnapshot.get(1).deviceId())
+                        && firstSnapshot.get(0).channel().equals(firstSnapshot.get(1).channel()),
+                "alternative target selection must avoid the reserved breach footprint");
+    }
+
+    @Test
+    void breachHighIsNotAdmittedWithoutACanonicalWarningTarget() {
+        List<Device> registry = List.of(new Device("ups-1", "ups", List.of(
+                new Channel("battery_pct", "%"),
+                new Channel("input_voltage", "V"))));
+        SimulatorEngine engine = new SimulatorEngine(registry,
+                anomalyConfig(17L, 1, 2, 2, List.of("breach_high")));
+
+        for (int tick = 0; tick < 10; tick++) {
+            List<Reading> readings = engine.tick(tick);
+            assertEquals(2, readings.size());
+            assertTrue(engine.currentAnomalies().isEmpty());
+        }
+    }
+
+    @Test
+    void currentAnomaliesIsImmutableAndDoesNotChangeAfterLaterTicks() {
+        SimulatorEngine engine = engine(anomalyConfig(22L, 2, 3, 2, List.of("breach_high")));
+        engine.tick(0);
+        engine.tick(1);
+        engine.tick(2);
+
+        List<AnomalyInfo> snapshot = engine.currentAnomalies();
+        assertThrows(UnsupportedOperationException.class, snapshot::clear);
+
+        engine.tick(3);
+        engine.tick(4);
+        assertEquals(1, snapshot.size());
+        assertEquals("ACTIVE", snapshot.get(0).phase());
+        assertEquals(List.of(1L, 2L),
+                engine.currentAnomalies().stream().map(AnomalyInfo::id).toList());
+    }
+
+    @Test
+    void identicalInputsProduceIdenticalConcurrentSnapshotsAndReadings() {
+        Config config = anomalyConfig(
+                81L, 2, 3, 2, List.of("breach_high", "mains_loss"));
+        SimulatorEngine first = engine(config);
+        SimulatorEngine second = engine(config);
+
+        for (int tick = 0; tick < 50; tick++) {
+            assertEquals(first.tick(tick), second.tick(tick), "readings at tick " + tick);
+            assertEquals(first.currentAnomalies(), second.currentAnomalies(),
+                    "anomaly snapshot at tick " + tick);
+        }
+    }
+
+    @Test
+    void maxConcurrencyOnePreservesTheLegacyGoldenSequence() {
+        SimulatorEngine engine = engine(anomalyConfig(
+                42L, 10, 3, 1, List.of("breach_high", "mains_loss")));
+        List<Long> onsetTicks = new ArrayList<>();
+        List<String> targets = new ArrayList<>();
+        List<Object> selectedValues = new ArrayList<>();
+        List<Long> timestamps = new ArrayList<>();
+        long lastObservedId = 0;
+
+        List<String> expectedReadingOrder = List.of(
+                "rack-a1/intake_temp", "rack-a1/exhaust_temp", "rack-a1/humidity",
+                "rack-a1/power_draw", "rack-a1/fan_rpm", "rack-a1/door_contact",
+                "rack-a2/intake_temp", "rack-a2/exhaust_temp", "rack-a2/humidity",
+                "rack-a2/power_draw", "rack-a2/fan_rpm", "rack-a2/door_contact",
+                "ups-1/load_pct", "ups-1/battery_pct", "ups-1/input_voltage",
+                "pdu-a1/power_draw", "pdu-a1/current",
+                "crac-1/supply_temp", "crac-1/return_temp", "crac-1/fan_rpm");
+
+        for (int tick = 0; tick <= 30; tick++) {
+            List<Reading> readings = engine.tick(tick);
+            if (tick == 0) {
+                assertEquals(expectedReadingOrder, readings.stream()
+                        .map(reading -> reading.deviceId() + "/" + reading.channel())
+                        .toList());
+                assertEquals(20.4, valueOf(readings, "rack-a1", "intake_temp"));
+            }
+
+            List<AnomalyInfo> anomalies = engine.currentAnomalies();
+            if (!anomalies.isEmpty() && anomalies.get(0).id() != lastObservedId) {
+                AnomalyInfo anomaly = anomalies.get(0);
+                lastObservedId = anomaly.id();
+                onsetTicks.add((long) tick);
+                targets.add(anomaly.scenario() + ":" + anomaly.deviceId() + "/" + anomaly.channel());
+                Reading selected = readings.stream()
+                        .filter(reading -> reading.deviceId().equals(anomaly.deviceId())
+                                && reading.channel().equals(anomaly.channel()))
+                        .findFirst()
+                        .orElseThrow();
+                selectedValues.add(selected.value());
+                timestamps.add(selected.timestamp().getTime());
+            }
+        }
+
+        assertEquals(List.of(10L, 20L, 30L), onsetTicks);
+        assertEquals(List.of(
+                "breach_high:rack-a1/intake_temp",
+                "mains_loss:ups-1/battery_pct",
+                "breach_high:crac-1/return_temp"), targets);
+        assertEquals(List.of(35.2, 97.5, 39.3), selectedValues,
+                "selected values also guard anomaly target RNG draw count");
+        assertEquals(List.of(
+                START_EPOCH_MILLIS + 50_000L,
+                START_EPOCH_MILLIS + 100_000L,
+                START_EPOCH_MILLIS + 150_000L), timestamps);
+    }
+
+    @Test
+    void mainsLossReservesAndMutatesTheCompleteUpsFootprintOnlyOncePerTick() {
+        List<Device> registry = new ArrayList<>(serverRoomRegistry());
+        registry.add(new Device("ups-2", "ups", List.of(
+                new Channel("load_pct", "%"),
+                new Channel("battery_pct", "%"),
+                new Channel("input_voltage", "V"))));
+        SimulatorEngine engine = new SimulatorEngine(registry,
+                anomalyConfig(31L, 1, 2, 2, List.of("mains_loss")));
+
+        engine.tick(0);
+        for (int tick = 1; tick <= 4; tick++) {
+            List<Reading> readings = engine.tick(tick);
+            assertEquals(1, engine.currentAnomalies().size(),
+                    "the complete UPS footprint remains reserved at tick " + tick);
+            assertEquals(1L, engine.currentAnomalies().get(0).id(),
+                    "colliding scheduled starts do not consume IDs");
+            if (tick <= 2) {
+                double expectedBattery = 100.0 - tick * 2.5;
+                for (String ups : List.of("ups-1", "ups-2")) {
+                    assertEquals(expectedBattery, valueOf(readings, ups, "battery_pct"));
+                    assertTrue(valueOf(readings, ups, "input_voltage") < 10.0,
+                            ups + " input voltage is affected by the same logical anomaly");
+                }
+            }
+        }
+
+        List<Reading> replacementTick = engine.tick(5);
+        assertEquals(2L, engine.currentAnomalies().get(0).id(),
+                "release occurs before the colliding scenario is admitted on the deadline tick");
+        assertEquals(94.5, valueOf(replacementTick, "ups-1", "battery_pct"),
+                "one logical mains loss applies one battery mutation per channel/tick");
+        assertEquals(94.5, valueOf(replacementTick, "ups-2", "battery_pct"));
     }
 
     @Test
@@ -381,10 +613,10 @@ class SimulatorEngineTest {
 
         for (int tick = 0; tick <= 110; tick++) {
             perTick.add(engine.tick(tick));
-            Optional<AnomalyInfo> anomaly = engine.currentAnomaly();
-            phasePerTick.add(anomaly.map(AnomalyInfo::phase).orElse("NORMAL"));
+            List<AnomalyInfo> anomalies = engine.currentAnomalies();
+            phasePerTick.add(anomalies.isEmpty() ? "NORMAL" : anomalies.get(0).phase());
             if (tick == 60) {
-                AnomalyInfo info = anomaly.orElseThrow();
+                AnomalyInfo info = anomalies.get(0);
                 assertEquals("ACTIVE", info.phase());
                 assertEquals("breach_high", info.scenario());
                 targetDevice = info.deviceId();
@@ -416,7 +648,7 @@ class SimulatorEngineTest {
 
         assertTrue(sawActive, "an ACTIVE breach window must occur");
         assertTrue(recoveredToNormal, "the channel must return to its normal band");
-        assertTrue(engine.currentAnomaly().isEmpty(), "the state machine returns to NORMAL");
+        assertTrue(engine.currentAnomalies().isEmpty(), "the state machine returns to NORMAL");
     }
 
     /**
@@ -443,7 +675,7 @@ class SimulatorEngineTest {
         int every = 10;
         int duration = 3;
         int ticks = 45;
-        SimulatorEngine engine = engine(new Config(5, 77L, true, every, duration,
+        SimulatorEngine engine = engine(new Config(5, 77L, true, every, duration, 2,
                 List.of("breach_high"), START_EPOCH_MILLIS));
 
         List<List<Reading>> perTick = new java.util.ArrayList<>();
@@ -499,7 +731,7 @@ class SimulatorEngineTest {
     @Test
     void breachHighTargetsOnlyCanonicalWarningAlertChannels() {
         SimulatorEngine engine = engine(new Config(
-                5, 42L, true, 10, 3,
+                5, 42L, true, 10, 3, 2,
                 List.of("breach_high"), START_EPOCH_MILLIS));
 
         java.util.Set<String> allowed = java.util.Set.of(
@@ -513,13 +745,15 @@ class SimulatorEngineTest {
 
         for (int tick = 0; tick <= 1_000; tick++) {
             engine.tick(tick);
-            Optional<AnomalyInfo> anomaly = engine.currentAnomaly();
+            List<AnomalyInfo> anomalies = engine.currentAnomalies();
 
-            if (anomaly.isPresent() && "ACTIVE".equals(anomaly.get().phase())) {
-                String target = anomaly.get().deviceId() + "/" + anomaly.get().channel();
-                assertTrue(allowed.contains(target),
-                        "breach_high selected a channel without a canonical warning alert rule: " + target);
-                observed.add(target);
+            for (AnomalyInfo anomaly : anomalies) {
+                if ("ACTIVE".equals(anomaly.phase())) {
+                    String target = anomaly.deviceId() + "/" + anomaly.channel();
+                    assertTrue(allowed.contains(target),
+                            "breach_high selected a channel without a canonical warning alert rule: " + target);
+                    observed.add(target);
+                }
             }
         }
 
@@ -541,8 +775,8 @@ class SimulatorEngineTest {
             List<Reading> readings = engine.tick(tick);
             double battery = valueOf(readings, "ups-1", "battery_pct");
             double voltage = valueOf(readings, "ups-1", "input_voltage");
-            Optional<AnomalyInfo> anomaly = engine.currentAnomaly();
-            String phase = anomaly.map(AnomalyInfo::phase).orElse("NORMAL");
+            List<AnomalyInfo> anomalies = engine.currentAnomalies();
+            String phase = anomalies.isEmpty() ? "NORMAL" : anomalies.get(0).phase();
 
             if ("ACTIVE".equals(phase)) {
                 minVoltageDuringActive = Math.min(minVoltageDuringActive, voltage);

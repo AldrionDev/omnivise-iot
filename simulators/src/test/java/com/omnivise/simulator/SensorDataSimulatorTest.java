@@ -63,7 +63,7 @@ class SensorDataSimulatorTest {
                 new Channel("intake_temp", "°C"),
                 new Channel("power_draw", "W"))));
         return new SimulatorEngine(registry, new SimulatorEngine.Config(
-                intervalSeconds, seed, false, 60, 6,
+                intervalSeconds, seed, false, 60, 6, 2,
                 List.of("breach_high", "mains_loss"), startMillis));
     }
 
@@ -125,7 +125,7 @@ class SensorDataSimulatorTest {
         List<Device> firstRegistry = SensorDataSimulator.parseDevices(List.of(rackA, rackB));
         List<Device> reversedRegistry = SensorDataSimulator.parseDevices(List.of(rackB, rackA));
         SimulatorEngine.Config config = new SimulatorEngine.Config(
-                5, 42L, false, 60, 6,
+                5, 42L, false, 60, 6, 2,
                 List.of("breach_high", "mains_loss"), START);
 
         List<Reading> first = readings(new SimulatorEngine(firstRegistry, config), 8);
