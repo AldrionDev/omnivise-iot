@@ -19,9 +19,9 @@ reading per device/channel straight into the `sensor_readings` collection.
     the mean rack exhaust;
   - bounded Gaussian noise on every continuous channel;
   - `door_contact` is mostly `"closed"` with rare, seed-deterministic opens.
-- **Anomaly injection** (env-gated, off by default): a small
-  `NORMAL → ACTIVE → RECOVERY → NORMAL` state machine, at most one anomaly at a
-  time. Scenarios cycle round-robin:
+- **Anomaly injection** (env-gated, off by default): bounded concurrent
+  `NORMAL → ACTIVE → RECOVERY → NORMAL` lifecycle instances. The default allows
+  one instance; configurations may allow up to two. Scenarios cycle round-robin:
   - `breach_high` — one device/channel is pushed well past a breach value for a
     bounded window, then recovers;
   - `mains_loss` — `ups` `input_voltage` sags and `battery_pct` discharges during
@@ -60,32 +60,45 @@ docker compose up -d sensor-simulator
 
 ## ⚙️ Environment variables
 
-| Variable                 | Default                                     | Description                                                                 |
-| ------------------------ | ------------------------------------------- | -------------------------------------------------------------------------- |
-| `MONGO_URI`              | `mongodb://localhost:27017/?replicaSet=rs0` | MongoDB connection string                                                 |
-| `MONGO_DATABASE`         | `omnivise_iot`                              | Database name                                                             |
-| `MONGO_COLLECTION`       | `sensor_readings`                           | Target collection                                                         |
-| `INTERVAL_SECONDS`       | `5`                                         | Simulated seconds between ticks (must be `>= 1`)                          |
-| `ANOMALY_MODE`           | `false`                                     | Enable anomaly injection                                                  |
-| `ANOMALY_EVERY_TICKS`    | `60`                                        | Ticks between anomaly onsets (~5 min at the default interval)             |
-| `ANOMALY_DURATION_TICKS` | `6`                                         | Length of the ACTIVE window (~30s at the default interval)               |
-| `SEED`                   | `42`                                        | PRNG seed; unset/blank → `42`                                                                                   |
-| `START_TIME`             | launch time                                 | Optional fixed ISO-8601 **simulation** start instant, e.g. `2026-09-10T00:00:00Z`; blank keeps launch-time behavior |
+| Variable                       | Default                                     | Description                                                                 |
+| ------------------------------ | ------------------------------------------- | --------------------------------------------------------------------------- |
+| `MONGO_URI`                    | `mongodb://localhost:27017/?replicaSet=rs0` | MongoDB connection string                                                   |
+| `MONGO_DATABASE`               | `omnivise_iot`                              | Database name                                                               |
+| `MONGO_COLLECTION`             | `sensor_readings`                           | Target collection                                                           |
+| `INTERVAL_SECONDS`             | `5`                                         | Simulated seconds between ticks                                             |
+| `ANOMALY_MODE`                 | `false`                                     | Enable anomaly injection; accepts only `true` or `false`                    |
+| `ANOMALY_EVERY_TICKS`          | `60`                                        | Ticks between anomaly onsets                                                |
+| `ANOMALY_DURATION_TICKS`       | `6`                                         | Length of the ACTIVE window                                                 |
+| `ANOMALY_RECOVERY_TICKS`       | blank                                       | RECOVERY length; blank derives `max(2, duration / 2)`                        |
+| `MAX_CONCURRENT_ANOMALIES`     | `1`                                         | Maximum simultaneous ACTIVE/RECOVERY instances; supported range `1..2`     |
+| `SEED`                         | `42`                                        | PRNG seed; unset/blank uses `42`                                             |
+| `START_TIME`                   | launch time                                 | Optional fixed ISO-8601 simulation start instant                            |
 
 The config is validated at startup and the simulator refuses to run on an
 invalid combination:
 
-- `INTERVAL_SECONDS >= 1` (always);
-- when `ANOMALY_MODE=true`: `ANOMALY_DURATION_TICKS >= 1`, and
-  `ANOMALY_EVERY_TICKS > ANOMALY_DURATION_TICKS + recoveryTicks` where
-  `recoveryTicks = max(2, ANOMALY_DURATION_TICKS / 2)`. Only then does the next
-  onset land in a NORMAL phase, so the configured cadence actually holds (at most
-   one anomaly is ever active). With `ANOMALY_MODE=false` the anomaly values are
-   inert and not checked.
-- when `START_TIME` is set, it must be an ISO-8601 instant; otherwise the
+- Whitespace is trimmed before parsing. Numeric settings must be integer tokens;
+  malformed values fail startup. `ANOMALY_MODE` accepts only the exact tokens
+  `true` and `false` after trimming; values such as `TRUE`, `yes`, or `1` fail.
+- `INTERVAL_SECONDS`, `ANOMALY_EVERY_TICKS`, `ANOMALY_DURATION_TICKS`, and an
+  explicit `ANOMALY_RECOVERY_TICKS` must be `>= 1`.
+- `MAX_CONCURRENT_ANOMALIES` must be `1` or `2`.
+- All scalar settings are parsed and range-checked even when anomaly mode is off.
+- A blank or omitted recovery value preserves legacy behavior and derives
+  `max(2, ANOMALY_DURATION_TICKS / 2)` using integer division.
+- When `ANOMALY_MODE=true`, the lifecycle must fit the configured capacity:
+  `duration + effective recovery <= every * max concurrent`. Equality is valid,
+  and valid capacity allows every scheduled onset to be admitted.
+- When `START_TIME` is set, it must be an ISO-8601 instant; otherwise the
   simulation starts at process launch time. This setting affects generated
   timestamps and time-dependent signals only; it never delays process startup
   or controls runtime pacing.
+
+Docker Compose keeps anomaly mode off, optional compatibility-derived recovery,
+and max concurrency `1` by default. The homelab deployment explicitly uses
+`INTERVAL_SECONDS=5`, `ANOMALY_MODE=true`, `ANOMALY_EVERY_TICKS=12`,
+`ANOMALY_DURATION_TICKS=18`, `ANOMALY_RECOVERY_TICKS=6`,
+`MAX_CONCURRENT_ANOMALIES=2`, and `SEED=42`.
 
 ## 📊 Reading shape
 

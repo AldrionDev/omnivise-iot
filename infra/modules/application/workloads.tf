@@ -10,8 +10,14 @@ locals {
   mongo_uri         = "mongodb://mongodb:27017/?replicaSet=rs0" # deployment-safe URI contract (#33); byte-identical to docker-compose
   mongo_database    = "omnivise_iot"
   sensor_collection = "sensor_readings" # preserves the Docker Compose sensor collection contract
-  sensor_interval   = "5"               # 5 s == 5000 ms; preserves the Docker Compose simulation interval contract
-  mongodb_wait_host = "mongodb:27017"   # cluster-internal MongoDB Service, short name keeps the module environment-neutral
+  sensor_interval   = tostring(var.simulator_interval_seconds)
+  mongodb_wait_host = "mongodb:27017" # cluster-internal MongoDB Service, short name keeps the module environment-neutral
+
+  simulator_effective_recovery_ticks = (
+    var.simulator_anomaly_recovery_ticks != null
+    ? var.simulator_anomaly_recovery_ticks
+    : max(2, floor(var.simulator_anomaly_duration_ticks / 2))
+  )
 
   # FQDN backend authority for the frontend Nginx runtime name lookup; namespace
   # comes from the module input so the module stays environment-neutral. This is
@@ -62,17 +68,6 @@ resource "kubernetes_deployment_v1" "backend" {
   # The pod is not Ready until the init gate + /health pass; blocking apply on
   # rollout mirrors the MongoDB StatefulSet deadlock-avoidance rationale.
   wait_for_rollout = false
-
-  lifecycle {
-    precondition {
-      condition = (
-        !var.simulator_anomaly_mode ||
-        var.simulator_anomaly_every_ticks >
-        var.simulator_anomaly_duration_ticks + max(2, floor(var.simulator_anomaly_duration_ticks / 2))
-      )
-      error_message = "When simulator anomaly mode is enabled, simulator_anomaly_every_ticks must be greater than simulator_anomaly_duration_ticks + recovery ticks."
-    }
-  }
 
   spec {
     replicas = 1
@@ -318,6 +313,17 @@ resource "kubernetes_deployment_v1" "sensor_simulator" {
   # is PRIMARY.
   wait_for_rollout = false
 
+  lifecycle {
+    precondition {
+      condition = (
+        !var.simulator_anomaly_mode ||
+        var.simulator_anomaly_duration_ticks + local.simulator_effective_recovery_ticks <=
+        var.simulator_anomaly_every_ticks * var.simulator_max_concurrent_anomalies
+      )
+      error_message = "When simulator anomaly mode is enabled, simulator_anomaly_duration_ticks + effective recovery ticks must be <= simulator_anomaly_every_ticks * simulator_max_concurrent_anomalies."
+    }
+  }
+
   spec {
     replicas = 1
 
@@ -404,6 +410,16 @@ resource "kubernetes_deployment_v1" "sensor_simulator" {
           env {
             name  = "ANOMALY_DURATION_TICKS"
             value = tostring(var.simulator_anomaly_duration_ticks)
+          }
+
+          env {
+            name  = "ANOMALY_RECOVERY_TICKS"
+            value = tostring(local.simulator_effective_recovery_ticks)
+          }
+
+          env {
+            name  = "MAX_CONCURRENT_ANOMALIES"
+            value = tostring(var.simulator_max_concurrent_anomalies)
           }
 
           env {

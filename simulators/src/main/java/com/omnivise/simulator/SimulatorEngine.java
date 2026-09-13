@@ -54,18 +54,17 @@ public final class SimulatorEngine {
     /**
      * Engine configuration.
      *
-     * <p>Validated on construction (issue #71 finding B4): {@code intervalSeconds}
-     * must be at least 1, and — only when {@code anomalyMode} is on —
-     * {@code anomalyDurationTicks} must be at least 1 and
-     * {@code anomalyEveryTicks} must be at least 1, and
-     * {@code maxConcurrentAnomalies} must be 1 or 2. With {@code anomalyMode} off
-     * the anomaly values are inert and left unchecked.
+     * <p>All scalar bounds are validated on construction. When anomaly mode is
+     * enabled, the configured cadence must also have enough lifecycle capacity
+     * for every scheduled onset.
      *
      * @param intervalSeconds      simulated seconds between ticks ({@code >= 1})
      * @param seed                 PRNG seed; equal seeds produce equal sequences
      * @param anomalyMode          when {@code false}, the engine never leaves NORMAL
      * @param anomalyEveryTicks    ticks between anomaly onsets
      * @param anomalyDurationTicks length of the ACTIVE window
+     * @param anomalyRecoveryTicks length of the RECOVERY window; {@code null}
+     *                             derives {@code max(2, duration / 2)}
      * @param maxConcurrentAnomalies maximum simultaneous ACTIVE/RECOVERY instances
      * @param anomalyScenarios     scenarios cycled round-robin on each onset
      *                             ({@code "breach_high"}, {@code "mains_loss"})
@@ -77,6 +76,7 @@ public final class SimulatorEngine {
             boolean anomalyMode,
             int anomalyEveryTicks,
             int anomalyDurationTicks,
+            Integer anomalyRecoveryTicks,
             int maxConcurrentAnomalies,
             List<String> anomalyScenarios,
             long startEpochMillis) {
@@ -86,28 +86,54 @@ public final class SimulatorEngine {
                 throw new IllegalArgumentException(
                         "INTERVAL_SECONDS must be >= 1, was " + intervalSeconds);
             }
-            if (anomalyMode) {
-                if (anomalyDurationTicks < 1) {
-                    throw new IllegalArgumentException(
-                            "ANOMALY_DURATION_TICKS must be >= 1 when ANOMALY_MODE is on, was "
-                                    + anomalyDurationTicks);
-                }
-                if (anomalyEveryTicks < 1) {
-                    throw new IllegalArgumentException(
-                            "ANOMALY_EVERY_TICKS must be >= 1 when ANOMALY_MODE is on, was "
-                                    + anomalyEveryTicks);
-                }
-                if (maxConcurrentAnomalies < 1 || maxConcurrentAnomalies > 2) {
-                    throw new IllegalArgumentException(
-                            "MAX_CONCURRENT_ANOMALIES must be 1 or 2 when ANOMALY_MODE is on, was "
-                                    + maxConcurrentAnomalies);
-                }
+            if (anomalyEveryTicks < 1) {
+                throw new IllegalArgumentException(
+                        "ANOMALY_EVERY_TICKS must be >= 1, was " + anomalyEveryTicks);
+            }
+            if (anomalyDurationTicks < 1) {
+                throw new IllegalArgumentException(
+                        "ANOMALY_DURATION_TICKS must be >= 1, was " + anomalyDurationTicks);
+            }
+            if (anomalyRecoveryTicks == null) {
+                anomalyRecoveryTicks = recoveryTicks(anomalyDurationTicks);
+            }
+            if (anomalyRecoveryTicks < 1) {
+                throw new IllegalArgumentException(
+                        "ANOMALY_RECOVERY_TICKS must be >= 1, was " + anomalyRecoveryTicks);
+            }
+            if (maxConcurrentAnomalies < 1 || maxConcurrentAnomalies > 2) {
+                throw new IllegalArgumentException(
+                        "MAX_CONCURRENT_ANOMALIES must be 1 or 2, was "
+                                + maxConcurrentAnomalies);
+            }
+            long lifecycleTicks = (long) anomalyDurationTicks + anomalyRecoveryTicks;
+            long availableTicks = (long) anomalyEveryTicks * maxConcurrentAnomalies;
+            if (anomalyMode && lifecycleTicks > availableTicks) {
+                throw new IllegalArgumentException(
+                        "ANOMALY_DURATION_TICKS + ANOMALY_RECOVERY_TICKS must be <= "
+                                + "ANOMALY_EVERY_TICKS * MAX_CONCURRENT_ANOMALIES, was "
+                                + lifecycleTicks + " > " + availableTicks);
             }
         }
 
-        /** Documented issue #71 defaults, with anomalies off. */
+        /** Compatibility constructor deriving recovery from the ACTIVE duration. */
+        public Config(
+                int intervalSeconds,
+                long seed,
+                boolean anomalyMode,
+                int anomalyEveryTicks,
+                int anomalyDurationTicks,
+                int maxConcurrentAnomalies,
+                List<String> anomalyScenarios,
+                long startEpochMillis) {
+            this(intervalSeconds, seed, anomalyMode, anomalyEveryTicks,
+                    anomalyDurationTicks, null, maxConcurrentAnomalies,
+                    anomalyScenarios, startEpochMillis);
+        }
+
+        /** Documented defaults, with anomalies off and compatibility-derived recovery. */
         public static Config defaults(long seed, long startEpochMillis) {
-            return new Config(5, seed, false, 60, 6, 2,
+            return new Config(5, seed, false, 60, 6, null, 1,
                     List.of("breach_high", "mains_loss"), startEpochMillis);
         }
     }
@@ -157,7 +183,7 @@ public final class SimulatorEngine {
         this.registry = List.copyOf(registry);
         this.config = config;
         this.random = new Random(config.seed());
-        this.recoveryTicks = recoveryTicks(config.anomalyDurationTicks());
+        this.recoveryTicks = config.anomalyRecoveryTicks();
         this.breachTargets = buildBreachTargets(this.registry);
         this.mainsLossFootprint = buildMainsLossFootprint(this.registry);
     }

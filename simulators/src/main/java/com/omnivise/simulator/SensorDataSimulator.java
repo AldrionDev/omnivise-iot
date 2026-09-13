@@ -48,32 +48,34 @@ public class SensorDataSimulator {
     }
 
     public static void main(String[] args) {
-        int intervalSeconds = envInt("INTERVAL_SECONDS", 5);
-        boolean anomalyMode = envBool("ANOMALY_MODE", false);
-        int anomalyEveryTicks = envInt("ANOMALY_EVERY_TICKS", 60);
-        int anomalyDurationTicks = envInt("ANOMALY_DURATION_TICKS", 6);
-        long seed = resolveSeed(ENV.get("SEED"));
-        long startMillis;
+        Config config;
         try {
-            startMillis = resolveStartMillis(ENV.get("START_TIME"), System.currentTimeMillis());
+            int intervalSeconds = resolveInt("INTERVAL_SECONDS", ENV.get("INTERVAL_SECONDS"), 5);
+            boolean anomalyMode = resolveBoolean("ANOMALY_MODE", ENV.get("ANOMALY_MODE"), false);
+            int anomalyEveryTicks = resolveInt(
+                    "ANOMALY_EVERY_TICKS", ENV.get("ANOMALY_EVERY_TICKS"), 60);
+            int anomalyDurationTicks = resolveInt(
+                    "ANOMALY_DURATION_TICKS", ENV.get("ANOMALY_DURATION_TICKS"), 6);
+            Integer anomalyRecoveryTicks = resolveOptionalInt(
+                    "ANOMALY_RECOVERY_TICKS", ENV.get("ANOMALY_RECOVERY_TICKS"));
+            int maxConcurrentAnomalies = resolveInt(
+                    "MAX_CONCURRENT_ANOMALIES", ENV.get("MAX_CONCURRENT_ANOMALIES"), 1);
+            long seed = resolveSeed(ENV.get("SEED"));
+            long startMillis = resolveStartMillis(ENV.get("START_TIME"), System.currentTimeMillis());
+
+            config = new Config(intervalSeconds, seed, anomalyMode,
+                    anomalyEveryTicks, anomalyDurationTicks, anomalyRecoveryTicks,
+                    maxConcurrentAnomalies,
+                    List.of("breach_high", "mains_loss"), startMillis);
         } catch (IllegalArgumentException e) {
             System.err.println("❌ Invalid configuration: " + e.getMessage());
             System.exit(1);
             return;
         }
 
-        // Fail fast on an invalid configuration, before opening any connection or
-        // starting the loop (issue #71 finding B4).
-        Config config;
-        try {
-            config = new Config(intervalSeconds, seed, anomalyMode,
-                    anomalyEveryTicks, anomalyDurationTicks, 2,
-                    List.of("breach_high", "mains_loss"), startMillis);
-        } catch (IllegalArgumentException e) {
-            System.err.println("❌ Invalid configuration: " + e.getMessage());
-            System.exit(1);
-            return; // unreachable; keeps `config` definitely assigned
-        }
+        int intervalSeconds = config.intervalSeconds();
+        long seed = config.seed();
+        long startMillis = config.startEpochMillis();
 
         System.out.println("🚀 Starting Sensor Data Simulator...");
         System.out.println("💾 Database: " + DATABASE_NAME);
@@ -83,8 +85,11 @@ public class SensorDataSimulator {
         System.out.println("🕒 Start time: " + Instant.ofEpochMilli(startMillis)
                 + (ENV.get("START_TIME") == null || ENV.get("START_TIME").isBlank()
                         ? " (wall clock)" : " (fixed by START_TIME)"));
-        System.out.println("⚠️  Anomaly mode: " + anomalyMode
-                + " (every " + anomalyEveryTicks + " ticks, for " + anomalyDurationTicks + " ticks)");
+        System.out.println("⚠️  Anomaly mode: " + config.anomalyMode()
+                + " (every " + config.anomalyEveryTicks()
+                + " ticks, active for " + config.anomalyDurationTicks()
+                + ", recovery for " + config.anomalyRecoveryTicks()
+                + ", max concurrent " + config.maxConcurrentAnomalies() + ")");
         System.out.println("-".repeat(60));
 
         try (MongoClient mongoClient = MongoClients.create(MONGO_URI)) {
@@ -187,7 +192,11 @@ public class SensorDataSimulator {
         if (rawSeedEnv == null || rawSeedEnv.isBlank()) {
             return 42L;
         }
-        return Long.parseLong(rawSeedEnv.trim());
+        try {
+            return Long.parseLong(rawSeedEnv.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("SEED must be an integer, was " + rawSeedEnv, e);
+        }
     }
 
     /** Resolves an optional fixed ISO-8601 start instant, or launch time when blank. */
@@ -271,13 +280,30 @@ public class SensorDataSimulator {
         return value;
     }
 
-    private static int envInt(String key, int fallback) {
-        String value = ENV.get(key);
-        return value == null || value.isBlank() ? fallback : Integer.parseInt(value.trim());
+    static int resolveInt(String key, String value, int fallback) {
+        if (value == null || value.isBlank()) {
+            return fallback;
+        }
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(key + " must be an integer, was " + value, e);
+        }
     }
 
-    private static boolean envBool(String key, boolean fallback) {
-        String value = ENV.get(key);
-        return value == null || value.isBlank() ? fallback : Boolean.parseBoolean(value.trim());
+    static Integer resolveOptionalInt(String key, String value) {
+        return value == null || value.isBlank() ? null : resolveInt(key, value, 0);
+    }
+
+    static boolean resolveBoolean(String key, String value, boolean fallback) {
+        if (value == null || value.isBlank()) {
+            return fallback;
+        }
+        return switch (value.trim()) {
+            case "true" -> true;
+            case "false" -> false;
+            default -> throw new IllegalArgumentException(
+                    key + " must be exactly true or false, was " + value);
+        };
     }
 }

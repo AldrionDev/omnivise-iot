@@ -63,7 +63,7 @@ class SensorDataSimulatorTest {
                 new Channel("intake_temp", "°C"),
                 new Channel("power_draw", "W"))));
         return new SimulatorEngine(registry, new SimulatorEngine.Config(
-                intervalSeconds, seed, false, 60, 6, 2,
+                intervalSeconds, seed, false, 60, 6, 1,
                 List.of("breach_high", "mains_loss"), startMillis));
     }
 
@@ -125,7 +125,7 @@ class SensorDataSimulatorTest {
         List<Device> firstRegistry = SensorDataSimulator.parseDevices(List.of(rackA, rackB));
         List<Device> reversedRegistry = SensorDataSimulator.parseDevices(List.of(rackB, rackA));
         SimulatorEngine.Config config = new SimulatorEngine.Config(
-                5, 42L, false, 60, 6, 2,
+                5, 42L, false, 60, 6, 1,
                 List.of("breach_high", "mains_loss"), START);
 
         List<Reading> first = readings(new SimulatorEngine(firstRegistry, config), 8);
@@ -148,6 +148,40 @@ class SensorDataSimulatorTest {
         assertEquals(7L, SensorDataSimulator.resolveSeed("7"));
         assertEquals(-3L, SensorDataSimulator.resolveSeed(" -3 "));
         assertEquals(20260910L, SensorDataSimulator.resolveSeed("20260910"));
+    }
+
+    @Test
+    void anomalyModeAcceptsOnlyExactTrueAndFalseTokensAfterTrimming() {
+        assertEquals(false, SensorDataSimulator.resolveBoolean("ANOMALY_MODE", null, false));
+        assertEquals(false, SensorDataSimulator.resolveBoolean("ANOMALY_MODE", "   ", false));
+        assertEquals(true, SensorDataSimulator.resolveBoolean("ANOMALY_MODE", "true", false));
+        assertEquals(false, SensorDataSimulator.resolveBoolean("ANOMALY_MODE", " false ", true));
+    }
+
+    @Test
+    void anomalyModeRejectsEveryOtherBooleanToken() {
+        for (String invalid : List.of("TRUE", "False", "yes", "1", "on")) {
+            IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                    () -> SensorDataSimulator.resolveBoolean("ANOMALY_MODE", invalid, false));
+            assertTrue(error.getMessage().contains("ANOMALY_MODE"));
+        }
+    }
+
+    @Test
+    void numericConfigurationUsesDefaultsForBlankValuesAndParsesIntegersStrictly() {
+        assertEquals(1, SensorDataSimulator.resolveInt("MAX_CONCURRENT_ANOMALIES", null, 1));
+        assertEquals(1, SensorDataSimulator.resolveInt("MAX_CONCURRENT_ANOMALIES", " ", 1));
+        assertEquals(2, SensorDataSimulator.resolveInt("MAX_CONCURRENT_ANOMALIES", " 2 ", 1));
+        assertEquals(null, SensorDataSimulator.resolveOptionalInt("ANOMALY_RECOVERY_TICKS", null));
+        assertEquals(null, SensorDataSimulator.resolveOptionalInt("ANOMALY_RECOVERY_TICKS", " "));
+        assertEquals(6, SensorDataSimulator.resolveOptionalInt("ANOMALY_RECOVERY_TICKS", " 6 "));
+
+        assertThrows(IllegalArgumentException.class,
+                () -> SensorDataSimulator.resolveInt("ANOMALY_EVERY_TICKS", "1.0", 60));
+        assertThrows(IllegalArgumentException.class,
+                () -> SensorDataSimulator.resolveOptionalInt("ANOMALY_RECOVERY_TICKS", "six"));
+        assertThrows(IllegalArgumentException.class,
+                () -> SensorDataSimulator.resolveSeed("42.0"));
     }
 
     @Test
