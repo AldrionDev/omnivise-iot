@@ -274,18 +274,25 @@ Do not recompute deployment variables between approval and apply.
 
 Use separate Terraform roots and separate HCP Terraform workspaces/states per deployment target.
 
-Preferred long-term structure:
+Target structure:
 
 ```text
 infra/
   homelab/
-    # existing homelab deployment
+    # homelab Kubernetes application
     # HCP workspace: omnivise-iot-k8s
 
+  aws-platform/
+    # AWS VPC, EKS, node group, and platform IAM/access
+    # HCP workspace: omnivise-iot-aws-platform
+
   aws/
-    # future EKS deployment
+    # AWS EKS Kubernetes application
     # separate HCP workspace/state
 ```
+
+The AWS platform and AWS application are intentionally separate Terraform roots
+and states. Platform lifecycle must not be coupled to application lifecycle.
 
 Do not introduce unnecessary dynamic workspace-selection machinery merely to support multiple targets.
 
@@ -303,13 +310,16 @@ This keeps the environments independent and easy to understand.
 
 ## 12. HCP Terraform Execution Model
 
-The homelab deployment continues to use HCP Terraform with **Local Execution**.
+OmniVise Terraform deployment roots use HCP Terraform with **Local Execution**.
 
-Reason:
+HCP Terraform provides authoritative remote state and locking while Terraform
+itself executes on the operator or Jenkins host.
 
-- the k3s API is LAN-only;
-- Terraform must execute on the Jenkins host;
-- HCP Terraform provides remote state and locking.
+Current literal workspaces include:
+
+- `omnivise-iot-k8s` for `infra/homelab/`;
+- `omnivise-iot-aws-platform` for `infra/aws-platform/`;
+- a separate workspace/state for the future `infra/aws/` application root.
 
 There must be no fallback to local Terraform state if HCP is unavailable.
 
@@ -545,11 +555,12 @@ HomeStreamLab-specific behavior must not be copied blindly, including:
 
 OmniVise has its own three-image runtime, MongoDB replica set, WebSocket data path, and already-proven homelab verification requirements.
 
-On Terraform workspaces specifically: OmniVise deliberately uses one literal HCP
-Terraform workspace per deployment target. Homelab uses the existing
-`omnivise-iot-k8s` workspace; future AWS uses a separate literal workspace/state.
+On Terraform workspaces specifically: OmniVise deliberately uses literal HCP
+Terraform workspaces per independently managed Terraform root. Homelab uses
+`omnivise-iot-k8s`; the AWS platform uses `omnivise-iot-aws-platform`; and the
+future AWS application root will use its own separate workspace/state.
 Do not introduce dynamic workspace-selection machinery. The mistake to avoid is
-assuming that one workspace covers every deployment target.
+assuming that one workspace covers every deployment target or lifecycle boundary.
 
 ## 25. Milestone Boundaries
 
@@ -574,14 +585,16 @@ including:
 - bounded non-destructive OmniVise post-deploy smoke;
 - cleanup and audit-friendly logging.
 
-### Future milestone: AWS EKS Deployment
+### Current milestone: AWS EKS Deployment
 
-First prove the AWS infrastructure and deployment manually.
+The AWS platform foundation is implemented first and proved manually before
+application delivery is automated.
 
-Expected direction:
+Current direction:
 
-- `infra/aws/`;
-- EKS;
+- `infra/aws-platform/` for AWS VPC/EKS/platform lifecycle;
+- `infra/aws/` for Kubernetes application lifecycle;
+- separate HCP Terraform workspaces/states;
 - GHCR images;
 - explicit Jenkins-compatible AWS credential model;
 - no GitHub OIDC;

@@ -153,8 +153,11 @@ Jenkins owns delivery (`Jenkinsfile`). `DEPLOY_TARGET` currently offers only
   state, Terraform or state failure, readiness timeout, image mismatch, or smoke
   failure all stop the pipeline. There is no automatic rollback.
 
-AWS / EKS delivery is **not implemented**. See [Current scope and future
-direction](#current-scope-and-future-direction).
+The AWS EKS **platform foundation** is implemented in `infra/aws-platform/`.
+Application deployment, ingress, GHCR publication, and Jenkins `aws` / `both`
+delivery remain in progress. See
+[Current scope and future direction](#current-scope-and-future-direction) and
+[`docs/aws-eks-platform.md`](docs/aws-eks-platform.md).
 
 ## Homelab deployment
 
@@ -371,8 +374,11 @@ Data and persistence:
 - MongoDB time-series collections with TTL (currently using plain collections)
 
 Infrastructure:
-- AWS / EKS deployment target: `infra/aws/`, GHCR images, and `DEPLOY_TARGET=aws` / `both`
-- Declared non-goals for AWS work: no Amazon ECR, no GitHub-to-AWS OIDC
+- AWS EKS platform foundation: `infra/aws-platform/` with dedicated HCP Terraform
+  workspace/state and Local Execution.
+- AWS application deployment remains future work in `infra/aws/`, together with
+  GHCR images and `DEPLOY_TARGET=aws` / `both`.
+- Declared non-goals for AWS work: no Amazon ECR, no GitHub-to-AWS OIDC.
 
-This is architecture direction only. None of these future capabilities exist in the
-repository today.
+The AWS platform foundation now exists. The remaining items in this section are
+still future application and delivery capabilities.
