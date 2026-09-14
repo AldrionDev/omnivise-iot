@@ -195,3 +195,89 @@ terraform apply tfplan
 
 Do not destroy shared or unrelated AWS resources. The platform Terraform state
 must contain only resources owned by this project.
+
+## EBS CSI Storage Capability
+
+Persistent EBS storage is a platform capability owned by:
+
+```text
+infra/aws-platform/
+````
+
+The platform manages the following Amazon EKS add-ons for Kubernetes `1.36`:
+
+```text
+eks-pod-identity-agent  v1.3.10-eksbuild.3
+aws-ebs-csi-driver      v1.66.0-eksbuild.1
+```
+
+The Amazon EBS CSI Driver uses EKS Pod Identity rather than IRSA or worker-node
+IAM permissions.
+
+The EBS CSI controller service account:
+
+```text
+kube-system/ebs-csi-controller-sa
+```
+
+is associated with the dedicated Terraform-managed IAM role:
+
+```text
+omnivise-iot-aws-ebs-csi
+```
+
+The role trusts `pods.eks.amazonaws.com` and is restricted through Pod Identity
+request tags to:
+
+```text
+cluster:         omnivise-iot
+namespace:       kube-system
+service account: ebs-csi-controller-sa
+```
+
+The role receives only the AWS-managed:
+
+```text
+AmazonEBSCSIDriverEKSClusterScopedPolicy
+```
+
+policy. EBS CSI permissions are not attached to the EKS worker-node IAM role.
+
+The EBS CSI add-on owns the Pod Identity association.
+
+### Runtime Acceptance
+
+Issue #126 verified dynamic EBS provisioning with a temporary StorageClass using:
+
+```text
+provisioner:       ebs.csi.aws.com
+type:              gp3
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy:     Delete
+```
+
+Acceptance proved that:
+
+* the temporary PVC reached `Bound`;
+* the verification pod reached `Running`;
+* the pod successfully mounted the dynamically provisioned EBS volume;
+* a sentinel value could be written to and read back from the mounted filesystem;
+* the resulting PersistentVolume used the `ebs.csi.aws.com` CSI driver;
+* the backing AWS volume used `gp3`;
+* the EBS volume and scheduled Kubernetes node were in the same Availability Zone;
+* the volume carried `ebs.csi.aws.com/cluster-name=omnivise-iot`;
+* deleting the temporary PVC deleted the PersistentVolume;
+* deleting the temporary PVC also deleted the backing EBS volume;
+* the temporary StorageClass and namespace were deleted;
+* no acceptance-test Kubernetes or EBS resources remained afterward.
+
+MongoDB and other application workloads remain outside this platform root.
+They will be owned by the separate AWS application Terraform root.
+
+After acceptance, a fresh Terraform plan reported:
+
+```text
+No changes. Your infrastructure matches the configuration.
+```
+
+with detailed exit code `0`.

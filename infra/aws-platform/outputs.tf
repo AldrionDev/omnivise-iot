@@ -38,3 +38,19 @@ output "operator_principal_arn" {
   description = "Bootstrap/operator IAM principal with declarative EKS cluster-admin access."
   value       = aws_eks_access_entry.operator.principal_arn
 }
+
+
+output "pod_identity_agent_addon_version" {
+  description = "Pinned EKS Pod Identity Agent add-on version."
+  value       = aws_eks_addon.pod_identity_agent.addon_version
+}
+
+output "ebs_csi_addon_version" {
+  description = "Pinned Amazon EBS CSI Driver add-on version."
+  value       = aws_eks_addon.ebs_csi.addon_version
+}
+
+output "ebs_csi_role_arn" {
+  description = "IAM role used by the EBS CSI controller through EKS Pod Identity."
+  value       = aws_iam_role.ebs_csi.arn
+}
