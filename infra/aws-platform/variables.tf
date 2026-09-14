@@ -149,3 +149,26 @@ variable "operator_principal_arn" {
     error_message = "operator_principal_arn must be an IAM role ARN."
   }
 }
+
+
+variable "pod_identity_agent_addon_version" {
+  type        = string
+  description = "Pinned EKS managed add-on version for the Pod Identity Agent."
+  default     = "v1.3.10-eksbuild.3"
+
+  validation {
+    condition     = var.pod_identity_agent_addon_version == "v1.3.10-eksbuild.3"
+    error_message = "Issue #126 pins the Pod Identity Agent to v1.3.10-eksbuild.3 for Kubernetes 1.36."
+  }
+}
+
+variable "ebs_csi_addon_version" {
+  type        = string
+  description = "Pinned EKS managed add-on version for the Amazon EBS CSI Driver."
+  default     = "v1.66.0-eksbuild.1"
+
+  validation {
+    condition     = var.ebs_csi_addon_version == "v1.66.0-eksbuild.1"
+    error_message = "Issue #126 pins the Amazon EBS CSI Driver to v1.66.0-eksbuild.1 for Kubernetes 1.36."
+  }
+}
