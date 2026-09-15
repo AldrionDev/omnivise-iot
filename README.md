@@ -379,6 +379,11 @@ Infrastructure:
 - AWS application deployment remains future work in `infra/aws/`, together with
   GHCR images and `DEPLOY_TARGET=aws` / `both`.
 - Declared non-goals for AWS work: no Amazon ECR, no GitHub-to-AWS OIDC.
+- The Jenkins AWS delivery identity and GHCR credential contract is defined,
+  provisioned, and verified (least-privilege bootstrap-user-assumes-role,
+  namespace-scoped EKS access, no `AdministratorAccess`, no OIDC). AWS
+  application deployment and GHCR image publication remain future work. See
+  [`docs/aws-delivery-identity.md`](docs/aws-delivery-identity.md).
 
 The AWS platform foundation now exists. The remaining items in this section are
 still future application and delivery capabilities.
