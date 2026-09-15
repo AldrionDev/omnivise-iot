@@ -382,7 +382,17 @@ Reason: the AWS account is shared by multiple users/projects, and the GitHub OID
 
 The AWS delivery path will therefore use explicit scoped AWS credentials supplied through Jenkins.
 
-The exact AWS credential design is future work.
+The established AWS delivery identity contract (issue #118) is: a dedicated
+`omnivise-iot-jenkins-bootstrap` IAM user, holding only `sts:AssumeRole` on the
+`omnivise-iot-jenkins-delivery` role, which in turn is scoped to
+`eks:DescribeCluster` on the `omnivise-iot` EKS cluster plus a namespace-scoped
+`AmazonEKSAdminPolicy` EKS access entry for the `omnivise-iot` namespace. No
+step in this chain uses `AdministratorAccess`, GitHub OIDC, or ECR. This
+identity has been provisioned and verified, and the corresponding Jenkins
+credentials (`aws-omnivise-iot-bootstrap`, `ghcr-omnivise-iot-publisher`) are
+onboarded in the shared Jenkins platform. See
+[`docs/aws-delivery-identity.md`](../aws-delivery-identity.md) for the full
+identity, credential, rotation, and verification contract.
 
 ## 16. AWS Registry Constraint
 
