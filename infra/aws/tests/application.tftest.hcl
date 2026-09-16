@@ -88,4 +88,32 @@ run "application_contract" {
     condition     = module.application.namespace == "omnivise-iot"
     error_message = "The shared application module must target the AWS application namespace."
   }
+
+  assert {
+    condition     = kubernetes_ingress_v1.frontend.spec[0].ingress_class_name == "alb"
+    error_message = "The AWS application ingress must use the ALB ingress class."
+  }
+
+  assert {
+    condition     = kubernetes_ingress_v1.frontend.metadata[0].annotations["alb.ingress.kubernetes.io/scheme"] == "internet-facing"
+    error_message = "The AWS application ingress must provision an internet-facing ALB."
+  }
+
+  assert {
+    condition = (
+      kubernetes_ingress_v1.frontend.spec[0].rule[0].http[0].path[0].backend[0].service[0].name == "frontend" &&
+      kubernetes_ingress_v1.frontend.spec[0].rule[0].http[0].path[0].backend[0].service[0].port[0].number == 80
+    )
+    error_message = "The AWS application ingress must route all traffic to the frontend Service on port 80."
+  }
+
+  assert {
+    condition     = kubernetes_ingress_v1.frontend.metadata[0].annotations["alb.ingress.kubernetes.io/target-type"] == "ip"
+    error_message = "The AWS application ingress must use ALB IP targets."
+  }
+
+  assert {
+    condition     = kubernetes_ingress_v1.frontend.metadata[0].annotations["alb.ingress.kubernetes.io/healthcheck-path"] == "/"
+    error_message = "The AWS application ingress health check must use the frontend root path."
+  }
 }
