@@ -14,23 +14,26 @@ and [`docs/aws-delivery-identity.md`](aws-delivery-identity.md). This document
 reports how the GHCR publication mechanism introduced by issue #121 was
 proven, independently of any AWS/EKS deployment (which remains issue #122).
 
-**The GHCR publication capability described here is implemented and has
-passed static/syntax checks. It has not been exercised against a live Jenkins
-run or live GHCR state, except for the read-only API spike in section 1. Do
-not treat any section below other than section 1 as executed evidence.**
+**The GHCR publication capability described here is implemented and has now
+been exercised against live Jenkins and live GHCR state. The observed runs
+covered GHCR BUILD via an existing homelab exact-SHA release set, GHCR REUSE,
+and the default homelab-only path with GHCR verification disabled. All
+GHCR-focused Jenkins runs were stopped at the human Terraform approval gate;
+no Terraform apply or Kubernetes mutation was performed during those
+verification runs.**
 
 ## Status summary
 
-| # | Scenario | Status |
-| --- | --- | --- |
-| 1 | Manual read-only GHCR API spike | **Completed** |
-| 2 | GHCR BUILD path (Jenkins run) | Pending |
-| 3 | GHCR REUSE path (Jenkins run) | Pending |
-| 4 | Homelab REUSE + GHCR BUILD — pull-not-rebuild (Jenkins run) | Pending |
-| 5 | GHCR REUSE + homelab BUILD — pull-not-rebuild (Jenkins run) | Pending |
-| 6 | Partial / fail-closed GHCR state (manual, outside Jenkins) | Pending |
-| 7 | Homelab regression (`ENABLE_GHCR_VERIFICATION=false`) | Pending |
-| 8 | No Kubernetes/Terraform mutation during GHCR verification | Pending |
+| #   | Scenario                                                    | Status                                               |
+| --- | ----------------------------------------------------------- | ---------------------------------------------------- |
+| 1   | Manual read-only GHCR API spike                             | **Completed**                                        |
+| 2   | GHCR BUILD path (Jenkins run)                               | **Completed**                                        |
+| 3   | GHCR REUSE path (Jenkins run)                               | **Completed**                                        |
+| 4   | Homelab REUSE + GHCR BUILD — pull-not-rebuild (Jenkins run) | **Completed**                                        |
+| 5   | GHCR REUSE + homelab BUILD — pull-not-rebuild (Jenkins run) | Pending                                              |
+| 6   | Partial / fail-closed GHCR state (manual, outside Jenkins)  | Pending                                              |
+| 7   | Homelab regression (`ENABLE_GHCR_VERIFICATION=false`)       | **Partially verified**                               |
+| 8   | No Kubernetes/Terraform mutation during GHCR verification   | **Completed for executed Jenkins verification runs** |
 
 ---
 
@@ -77,7 +80,7 @@ Consequences for the implementation:
 
 - The GHCR precheck and post-push verification both use the Registry V2
   Bearer-token exchange (not the GitHub REST Packages API, not `docker
-  manifest inspect`), since this was confirmed to give an explicit,
+manifest inspect`), since this was confirmed to give an explicit,
   deterministic HTTP status per call.
 - The token realm/service/scope shape is fixed for a given package, so
   `.github/scripts/ghcr-manifest-probe.sh` constructs the token request URL
@@ -117,27 +120,169 @@ Consequences for the implementation:
 
 ## 2. GHCR BUILD path (Jenkins run)
 
-**Status: pending.** Not yet executed. This section will record, once a real
-pipeline run with `ENABLE_GHCR_VERIFICATION=true` is executed against a Git
-SHA never before published to GHCR: the resolved `GHCR_RELEASE_ACTION`, the
-three pushed exact-SHA tags, and the three post-push `Docker-Content-Digest`
-values logged by the pipeline.
+**Status: completed.**
+
+A live Jenkins run was executed for trusted `main` at exact Git SHA:
+
+```text
+53a8b322700272fdd9c93415e1241f741f82296c
+```
+
+By the time GHCR verification was enabled for this SHA, the homelab registry
+already contained the complete exact-SHA release set, while GHCR did not.
+
+The Jenkins prechecks resolved:
+
+```text
+Homelab release-set precheck: REUSE
+GHCR release-set precheck: BUILD
+Artifact source: HOMELAB_REUSE
+```
+
+The pipeline therefore did not rebuild any image. Instead, it pulled the
+existing homelab exact-SHA artifacts and used those pulled local images as the
+source for GHCR publication.
+
+Observed homelab source digests:
+
+```text
+backend:
+  sha256:fdd3f28b80493b1286bd4551667a3da1cbac1dac8e45149d260de86c8e609a14
+
+frontend:
+  sha256:bf5a7c9a136be731f66a6d1499decf8670fc4d12bd9a4c8c8e6b54b0ed756899
+
+simulator:
+  sha256:3a4e0e24e8ac2a2f6a0bda9c7d45a5693e06f26877f849b443298c7fca1f3484
+```
+
+The following exact-SHA GHCR tags were then published:
+
+```text
+ghcr.io/aldriondev/omnivise-iot-backend:53a8b322700272fdd9c93415e1241f741f82296c
+ghcr.io/aldriondev/omnivise-iot-frontend:53a8b322700272fdd9c93415e1241f741f82296c
+ghcr.io/aldriondev/omnivise-iot-simulator:53a8b322700272fdd9c93415e1241f741f82296c
+```
+
+Observed GHCR post-push digests:
+
+```text
+backend:
+  sha256:fdd3f28b80493b1286bd4551667a3da1cbac1dac8e45149d260de86c8e609a14
+
+frontend:
+  sha256:bf5a7c9a136be731f66a6d1499decf8670fc4d12bd9a4c8c8e6b54b0ed756899
+
+simulator:
+  sha256:3a4e0e24e8ac2a2f6a0bda9c7d45a5693e06f26877f849b443298c7fca1f3484
+```
+
+For this observed run, the homelab and GHCR manifest digests happened to be
+equal for all three components. The implementation does not require or assert
+cross-registry digest equality; the release invariant is exact Git SHA plus
+no rebuild plus successful destination publication and verification.
+
+The pipeline logged:
+
+```text
+GHCR BUILD: three exact-SHA images published and verified to GHCR for
+53a8b322700272fdd9c93415e1241f741f82296c.
+```
 
 ## 3. GHCR REUSE path (Jenkins run)
 
-**Status: pending.** Not yet executed. This section will record a re-run
-against the same Git SHA from section 2, confirming `GHCR_RELEASE_ACTION =
-REUSE` and that no build or push occurred.
+**Status: completed.**
+
+A second Jenkins run was executed against the same trusted `main` SHA:
+
+```text
+53a8b322700272fdd9c93415e1241f741f82296c
+```
+
+At that point, both registries already contained the complete exact-SHA
+release set.
+
+The prechecks resolved:
+
+```text
+Homelab release-set precheck: REUSE
+GHCR release-set precheck: REUSE
+Artifact source: NONE
+```
+
+As expected, the following stages were skipped:
+
+```text
+Build images
+Acquire GHCR source artifact
+Acquire homelab source artifact from GHCR
+Publish images (homelab)
+Publish images (GHCR)
+```
+
+The pipeline reported:
+
+```text
+Homelab REUSE: all three omnivise-iot exact-SHA images already present for
+53a8b322700272fdd9c93415e1241f741f82296c; build and push skipped.
+
+GHCR REUSE: all three exact-SHA images already present in GHCR for
+53a8b322700272fdd9c93415e1241f741f82296c; publish skipped.
+```
+
+This confirms write-once reuse behavior for an already complete exact-SHA
+release set: no rebuild, no pull for republishing, and no push occurred.
 
 ## 4. Homelab REUSE + GHCR BUILD — pull-not-rebuild path (Jenkins run)
 
-**Status: pending.** Not yet executed. This section will record a run where
-the homelab release set already exists (`HOMELAB_RELEASE_ACTION = REUSE`) but
-GHCR does not (`GHCR_RELEASE_ACTION = BUILD`, `ARTIFACT_SOURCE =
-HOMELAB_REUSE`): confirmation that `Build images` was skipped, `Acquire GHCR
-source artifact` pulled the existing homelab images instead, and the
-resulting `SOURCE_*_DIGEST` / `Docker-Content-Digest` (GHCR) values logged for
-traceability.
+**Status: completed.**
+
+This scenario was exercised directly during the first live GHCR publication
+run for:
+
+```text
+53a8b322700272fdd9c93415e1241f741f82296c
+```
+
+Observed decision state:
+
+```text
+HOMELAB_RELEASE_ACTION = REUSE
+GHCR_RELEASE_ACTION    = BUILD
+ARTIFACT_SOURCE        = HOMELAB_REUSE
+```
+
+The `Build images` stage was skipped.
+
+The pipeline then pulled the three already-published homelab exact-SHA images
+and recorded their repository digests:
+
+```text
+backend:
+  192.168.1.197:5000/omnivise-iot/backend@
+  sha256:fdd3f28b80493b1286bd4551667a3da1cbac1dac8e45149d260de86c8e609a14
+
+frontend:
+  192.168.1.197:5000/omnivise-iot/frontend@
+  sha256:bf5a7c9a136be731f66a6d1499decf8670fc4d12bd9a4c8c8e6b54b0ed756899
+
+simulator:
+  192.168.1.197:5000/omnivise-iot/simulator@
+  sha256:3a4e0e24e8ac2a2f6a0bda9c7d45a5693e06f26877f849b443298c7fca1f3484
+```
+
+The pipeline explicitly logged:
+
+```text
+Pulled homelab exact-SHA artifacts as the GHCR publish source (no rebuild)
+```
+
+Those same pulled local image artifacts were then retagged and published to
+GHCR under the canonical exact-SHA tags.
+
+This verifies the intended asymmetric recovery/reuse case: if the homelab
+release set exists but GHCR does not, Jenkins reuses the existing exact-SHA
+artifacts and does not rebuild them.
 
 ## 5. GHCR REUSE + homelab BUILD — pull-not-rebuild path (Jenkins run)
 
@@ -170,18 +315,101 @@ or altered by this procedure.
 
 ## 7. Homelab regression
 
-**Status: pending.** Not yet executed. This section will record a normal
-`main` pipeline run with `ENABLE_GHCR_VERIFICATION=false` (the default),
-confirming the homelab BUILD/REUSE/publish/Terraform/smoke stages behave
-exactly as before issue #121, and that all GHCR-related stages are skipped.
+**Status: partially verified.**
+
+A live Jenkins run was executed for trusted `main` with the default:
+
+```text
+ENABLE_GHCR_VERIFICATION=false
+```
+
+for exact Git SHA:
+
+```text
+53a8b322700272fdd9c93415e1241f741f82296c
+```
+
+Observed behavior:
+
+```text
+Homelab release-set precheck: REUSE
+GHCR verification disabled (ENABLE_GHCR_VERIFICATION=false)
+Artifact source: NONE
+```
+
+All GHCR-related stages were skipped, including the GHCR release-set precheck
+and GHCR publication stage.
+
+The homelab release set was reused without rebuild or republish:
+
+```text
+Homelab REUSE: all three omnivise-iot exact-SHA images already present for
+53a8b322700272fdd9c93415e1241f741f82296c; build and push skipped.
+```
+
+Terraform initialization and planning continued normally, which demonstrates
+that disabling GHCR verification does not block the existing homelab delivery
+path.
+
+The run was intentionally aborted at the human approval gate before
+`terraform apply`. Therefore, the full deploy-and-smoke portion of the
+homelab regression path was not re-executed as part of issue #121
+verification.
+
+For that reason, this scenario remains **partially verified** rather than
+fully completed.
 
 ## 8. No Kubernetes/Terraform mutation during GHCR verification
 
-**Status: pending.** For every GHCR-focused verification run above that does
-involve a real Jenkins pipeline execution (sections 2–5, 7), the human
-approval `input` step gates the only Terraform-apply/Kubernetes-affecting
-stage in the pipeline; declining or aborting it, or simply not reaching it in
-scope-limited replay runs, keeps those runs read-only against the cluster.
-Section 6 involves no Jenkins job at all. This section will record the
-specific evidence (approval declined / stage not reached) for whichever runs
-are used to demonstrate sections 2–5 and 7.
+**Status: completed for all executed Jenkins verification runs.**
+
+All Jenkins verification runs used for sections 2, 3, 4, and 7 reached the
+existing Terraform human approval gate after the GHCR/homelab release-set
+logic completed.
+
+The saved Terraform plan for the observed runs included changes such as:
+
+```text
+Plan: 2 to add, 3 to change, 0 to destroy.
+```
+
+However, the approval prompt was not accepted.
+
+Instead, the runs were explicitly aborted at:
+
+```text
+Apply the exact saved Terraform plan infra/homelab/tfplan to the OmniVise
+homelab k3s target?
+```
+
+No `terraform apply "tfplan"` execution occurred.
+
+The pipeline cleanup then removed the saved local plan artifact:
+
+```text
+rm -f infra/homelab/tfplan
+```
+
+Accordingly, the GHCR verification activity performed for issue #121 caused:
+
+```text
+GHCR registry mutation:
+  yes, where publication was intentionally under test
+
+Homelab registry mutation:
+  yes, during the initial exact-SHA homelab publication that preceded the
+  GHCR BUILD acceptance case
+
+Terraform apply:
+  no
+
+Kubernetes workload mutation:
+  no
+
+AWS/EKS mutation:
+  no
+```
+
+This preserves the verification boundary for issue #121: GHCR release-set
+publication and reuse behavior were exercised live, while Kubernetes and AWS
+deployment mutation remained outside the verification scope.
