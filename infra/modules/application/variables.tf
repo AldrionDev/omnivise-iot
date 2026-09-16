@@ -1,6 +1,6 @@
 variable "namespace" {
   type        = string
-  description = "Name of the existing, platform-owned Kubernetes namespace OmniVise application resources deploy into."
+  description = "Name of the existing Kubernetes namespace owned outside this shared module that OmniVise application resources deploy into."
 
   validation {
     condition     = length(trimspace(var.namespace)) > 0
@@ -397,5 +397,20 @@ variable "mongodb_wait_memory_limit" {
   validation {
     condition     = length(trimspace(var.mongodb_wait_memory_limit)) > 0
     error_message = "mongodb_wait_memory_limit must not be empty."
+  }
+}
+
+variable "image_pull_secret_name" {
+  type        = string
+  default     = null
+  nullable    = true
+  description = "Optional Kubernetes image-pull Secret name for private application images. Null leaves pod imagePullSecrets unset."
+
+  validation {
+    condition = (
+      var.image_pull_secret_name == null ||
+      length(trimspace(var.image_pull_secret_name)) > 0
+    )
+    error_message = "image_pull_secret_name must be null or a non-empty Secret name."
   }
 }
