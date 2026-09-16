@@ -595,6 +595,38 @@ including:
 - bounded non-destructive OmniVise post-deploy smoke;
 - cleanup and audit-friendly logging.
 
+### Issue #121: GHCR release-set publication capability implemented; live acceptance verification pending
+
+Jenkins gains a GHCR publication capability for the exact-SHA OmniVise release
+set (`ghcr.io/aldriondev/omnivise-iot-<component>:<git-sha>`), reusing the same
+write-once / build-once / fail-closed contract already proven for the homelab
+registry. This is publication only — it does not implement or select any AWS
+deployment target. The mechanism is implemented and has passed static/syntax
+checks; it has **not yet been exercised against a live Jenkins run or live
+GHCR state** — see
+[`docs/ghcr-release-set-verification.md`](../ghcr-release-set-verification.md)
+for exactly which scenarios are still pending:
+
+- independent per-registry write-once precheck
+  (`HOMELAB_RELEASE_ACTION`, `GHCR_RELEASE_ACTION`);
+- an explicit, symmetric artifact-source decision (`ARTIFACT_SOURCE = BUILD |
+  HOMELAB_REUSE | GHCR_REUSE | NONE`) that guarantees each component image is
+  built at most once per run in either direction — when one registry already
+  has the release and the other does not, the pipeline pulls the existing
+  images from the registry that has them and publishes that same pulled local
+  image artifact to the other, without rebuilding. Cross-registry manifest
+  digests are logged as traceability evidence only and are not asserted
+  equal — a registry-side manifest representation can legitimately differ
+  even for the same pulled artifact;
+- GHCR Registry V2 Bearer-token precheck and post-push digest verification via
+  the shared `.github/scripts/ghcr-manifest-probe.sh`, using temporary
+  mode-0600 netrc and curl-config files rather than passing the PAT or the
+  Bearer token as curl arguments;
+- gated behind a temporary, narrowly-scoped `ENABLE_GHCR_VERIFICATION`
+  parameter (default `false`) that affects only the GHCR-related stages — it
+  does not touch `DEPLOY_TARGET`, select a Terraform root, or cause any
+  Terraform apply or Kubernetes mutation.
+
 ### Current milestone: AWS EKS Deployment
 
 The AWS platform foundation is implemented first and proved manually before
@@ -605,7 +637,9 @@ Current direction:
 - `infra/aws-platform/` for AWS VPC/EKS/platform lifecycle;
 - `infra/aws/` for Kubernetes application lifecycle;
 - separate HCP Terraform workspaces/states;
-- GHCR images;
+- GHCR images (publication mechanism implemented by issue #121; issue #122
+  wires it to `DEPLOY_TARGET` and adds the AWS/EKS deployment path itself,
+  removing the temporary `ENABLE_GHCR_VERIFICATION` parameter);
 - explicit Jenkins-compatible AWS credential model;
 - no GitHub OIDC;
 - no ECR.

@@ -17,14 +17,25 @@
 // Explicitly NOT in this milestone (see
 // docs/architecture/delivery-architecture.md): the destructive #40 MongoDB
 // pod-recreation persistence proof (delivery-architecture section 18),
-// rollback automation, GHCR, AWS / EKS / ECR, GitHub-to-AWS OIDC, and image
-// signing / SBOM / policy tooling. The post-deploy smoke never mutates the
-// cluster, the application, MongoDB, the registry or Terraform state. A future
-// AWS target adds `aws` / `both` to DEPLOY_TARGET and a parallel GHCR
-// publication branch plus a second Terraform root / HCP workspace alongside the
-// homelab one; it must extend this file, not rewrite the homelab path. There is
-// no separate PUSH_TARGET parameter — DEPLOY_TARGET alone controls both
-// publication and deployment.
+// rollback automation, AWS / EKS / ECR, GitHub-to-AWS OIDC, `DEPLOY_TARGET=aws`
+// or `both`, any AWS Terraform apply, and any Kubernetes mutation against EKS.
+// The post-deploy smoke never mutates the cluster, the application, MongoDB,
+// the registry or Terraform state. There is no separate PUSH_TARGET
+// parameter — DEPLOY_TARGET alone controls both publication and deployment.
+//
+// Issue #121 additionally publishes the same exact-SHA release set to GHCR
+// (ghcr.io/aldriondev/omnivise-iot-<component>:<git-sha>), reusing the same
+// write-once / build-once / fail-closed contract as the homelab registry.
+// GHCR publication is gated behind a temporary, narrowly-scoped boolean
+// parameter, ENABLE_GHCR_VERIFICATION (default false) — see its declaration
+// below. That parameter never selects a Terraform root, never triggers an AWS
+// apply, and never causes any Kubernetes mutation; it exists only to prove the
+// GHCR write-once/build-once/fail-closed mechanism ahead of issue #122, which
+// removes it once `DEPLOY_TARGET=aws|both` becomes authoritative and drives
+// GHCR publication directly. The GHCR Registry V2 Bearer-token probe/verify
+// logic lives in `.github/scripts/ghcr-manifest-probe.sh`, shared between this
+// pipeline and the manual partial-state verification procedure documented in
+// docs/ghcr-release-set-verification.md.
 //
 // This repository owns build + publication intent only. The Jenkins runtime,
 // the shared `homelab-preflight` capability, and the local homelab registry
@@ -38,6 +49,13 @@
 // Naming asymmetry is intentional and must not be "aligned": the registry path
 // segment is `simulator`, the build context directory is `simulators/`, and the
 // Kubernetes workload is `sensor-simulator`.
+//
+// Approved GHCR image contract (issue #121):
+//   ghcr.io/aldriondev/omnivise-iot-backend:<git-sha>
+//   ghcr.io/aldriondev/omnivise-iot-frontend:<git-sha>
+//   ghcr.io/aldriondev/omnivise-iot-simulator:<git-sha>
+// Flat package names, no nested `aldriondev/omnivise-iot/<component>` path —
+// this is the approved naming decision, not an oversight.
 
 pipeline {
     agent any
@@ -49,6 +67,18 @@ pipeline {
             name: 'DEPLOY_TARGET',
             choices: ['homelab'],
             description: 'Delivery target. Only "homelab" is supported in this milestone.'
+        )
+        // Temporary, issue-#121-scoped verification scaffolding — NOT a second
+        // permanent target selector. Its only effect is enabling the GHCR
+        // precheck/publish stages below. It never changes DEPLOY_TARGET, never
+        // selects an AWS Terraform root, never triggers a Terraform apply, and
+        // never causes any Kubernetes mutation. Issue #122 deletes this
+        // parameter once DEPLOY_TARGET=aws|both becomes authoritative and
+        // drives GHCR publication directly.
+        booleanParam(
+            name: 'ENABLE_GHCR_VERIFICATION',
+            defaultValue: false,
+            description: 'Temporary #121 scaffolding: also run the GHCR release-set precheck/publish. Removed by #122.'
         )
     }
 
@@ -77,6 +107,11 @@ pipeline {
         // Canonical registry repository prefix; the component segment
         // (backend | frontend | simulator) is appended per image.
         IMAGE_REPO = 'omnivise-iot'
+
+        // GHCR is a fixed public registry, not a homelab runtime detail — these
+        // are literals, not platform-supplied (issue #121).
+        GHCR_REGISTRY  = 'ghcr.io'
+        GHCR_NAMESPACE = 'aldriondev'
 
         // Terraform root for the homelab target. One literal HCP Terraform
         // workspace per target (delivery-architecture sections 11 and 24); the
@@ -148,11 +183,29 @@ pipeline {
                     env.FRONTEND_IMAGE  = "${env.REGISTRY}/${env.IMAGE_REPO}/frontend:${env.GIT_SHA}"
                     env.SIMULATOR_IMAGE = "${env.REGISTRY}/${env.IMAGE_REPO}/simulator:${env.GIT_SHA}"
 
+                    // GHCR refs (issue #121). Computed unconditionally — cheap
+                    // string construction, no side effect — but only consumed
+                    // downstream when ENABLE_GHCR_VERIFICATION is true.
+                    env.GHCR_BACKEND_IMAGE   = "${env.GHCR_REGISTRY}/${env.GHCR_NAMESPACE}/omnivise-iot-backend:${env.GIT_SHA}"
+                    env.GHCR_FRONTEND_IMAGE  = "${env.GHCR_REGISTRY}/${env.GHCR_NAMESPACE}/omnivise-iot-frontend:${env.GIT_SHA}"
+                    env.GHCR_SIMULATOR_IMAGE = "${env.GHCR_REGISTRY}/${env.GHCR_NAMESPACE}/omnivise-iot-simulator:${env.GIT_SHA}"
+
+                    // Default when the GHCR precheck stage does not run at all
+                    // (ENABLE_GHCR_VERIFICATION=false) — SKIPPED is treated
+                    // identically to REUSE by the artifact-source decision
+                    // below: it never forces a build or pull on its own.
+                    env.GHCR_RELEASE_ACTION = 'SKIPPED'
+
                     echo "Deploy target:   ${params.DEPLOY_TARGET}"
                     echo "Revision:        ${env.GIT_SHA}"
                     echo "Backend image:   ${env.BACKEND_IMAGE}"
                     echo "Frontend image:  ${env.FRONTEND_IMAGE}"
                     echo "Simulator image: ${env.SIMULATOR_IMAGE}"
+                    if (params.ENABLE_GHCR_VERIFICATION) {
+                        echo "GHCR backend:    ${env.GHCR_BACKEND_IMAGE}"
+                        echo "GHCR frontend:   ${env.GHCR_FRONTEND_IMAGE}"
+                        echo "GHCR simulator:  ${env.GHCR_SIMULATOR_IMAGE}"
+                    }
                 }
             }
         }
@@ -169,7 +222,7 @@ pipeline {
             }
         }
 
-        stage('Release-set write-once precheck') {
+        stage('Release-set write-once precheck (homelab)') {
             options { timeout(time: 5, unit: 'MINUTES') }
             steps {
                 // The three OmniVise images are one release set for the exact
@@ -189,7 +242,7 @@ pipeline {
                 // OCI manifest and the Docker manifest-list / Docker v2 media
                 // types together, matching the proven runbook behavior.
                 script {
-                    env.RELEASE_ACTION = sh(
+                    env.HOMELAB_RELEASE_ACTION = sh(
                         returnStdout: true,
                         script: '''
                             set -eu
@@ -222,18 +275,127 @@ pipeline {
                             fi
                         '''
                     ).trim()
-                    echo "Release-set precheck: ${env.RELEASE_ACTION}"
+                    echo "Homelab release-set precheck: ${env.HOMELAB_RELEASE_ACTION}"
+                }
+            }
+        }
+
+        stage('Release-set write-once precheck (GHCR)') {
+            // Temporary #121 scaffolding gate — see the ENABLE_GHCR_VERIFICATION
+            // parameter declaration above. Independent of the homelab precheck:
+            // homelab and GHCR can each independently be BUILD or REUSE.
+            when { expression { return params.ENABLE_GHCR_VERIFICATION } }
+            options { timeout(time: 5, unit: 'MINUTES') }
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'ghcr-omnivise-iot-publisher',
+                        usernameVariable: 'GHCR_USERNAME',
+                        passwordVariable: 'GHCR_TOKEN'
+                    )
+                ]) {
+                    script {
+                        // Delegates to the shared, spike-validated Registry V2
+                        // Bearer-token probe script (.github/scripts/
+                        // ghcr-manifest-probe.sh) — the single source of truth
+                        // also used for post-push verification below and for
+                        // the manual partial-state verification procedure in
+                        // docs/ghcr-release-set-verification.md. A per-component
+                        // probe failure (auth/transport/unexpected response)
+                        // exits non-zero under `set -eu` immediately, with its
+                        // own diagnostic already printed by the script.
+                        env.GHCR_RELEASE_ACTION = sh(
+                            returnStdout: true,
+                            script: '''
+                                set -eu
+                                set +x
+
+                                probe() {
+                                    sh .github/scripts/ghcr-manifest-probe.sh precheck "$1" "$GIT_SHA" \
+                                        | sed -n 's/^STATUS=//p'
+                                }
+
+                                backend_status=$(probe omnivise-iot-backend)
+                                frontend_status=$(probe omnivise-iot-frontend)
+                                simulator_status=$(probe omnivise-iot-simulator)
+
+                                if [ "$backend_status" = "PRESENT" ] && [ "$frontend_status" = "PRESENT" ] && [ "$simulator_status" = "PRESENT" ]; then
+                                    echo "REUSE"
+                                elif [ "$backend_status" = "ABSENT" ] && [ "$frontend_status" = "ABSENT" ] && [ "$simulator_status" = "ABSENT" ]; then
+                                    echo "BUILD"
+                                else
+                                    echo "GHCR release-set precheck failed closed: backend=$backend_status frontend=$frontend_status simulator=$simulator_status" >&2
+                                    exit 1
+                                fi
+                            '''
+                        ).trim()
+                        echo "GHCR release-set precheck: ${env.GHCR_RELEASE_ACTION}"
+                    }
+                }
+            }
+        }
+
+        stage('Determine artifact source') {
+            // Separates "does a local image artifact need to be produced, and
+            // how" from "does this registry need publishing" (issue #121).
+            // Artifact identity must be symmetric: neither registry ever
+            // rebuilds the exact Git SHA merely because it personally lacks
+            // the tag while the OTHER registry already has a proven artifact
+            // for that same SHA — the existing artifact is pulled and
+            // retagged instead, in whichever direction is needed.
+            //
+            // Required matrix:
+            //   homelab BUILD + GHCR BUILD  -> BUILD          (build once, both consume it)
+            //   homelab REUSE + GHCR BUILD  -> HOMELAB_REUSE  (pull homelab -> retag for GHCR)
+            //   homelab BUILD + GHCR REUSE  -> GHCR_REUSE     (pull GHCR -> retag for homelab)
+            //   homelab REUSE + GHCR REUSE  -> NONE           (nothing to do)
+            //
+            // GHCR_RELEASE_ACTION == 'SKIPPED' (ENABLE_GHCR_VERIFICATION=false)
+            // is deliberately NOT treated as GHCR needing REUSE-sourcing —
+            // GHCR is not participating in the run at all, so a homelab BUILD
+            // with GHCR skipped falls through to the plain BUILD branch,
+            // identical to pre-#121 behavior.
+            options { timeout(time: 1, unit: 'MINUTES') }
+            steps {
+                script {
+                    if (env.HOMELAB_RELEASE_ACTION == 'BUILD' && env.GHCR_RELEASE_ACTION == 'BUILD') {
+                        env.ARTIFACT_SOURCE = 'BUILD'
+                    } else if (env.HOMELAB_RELEASE_ACTION == 'REUSE' && env.GHCR_RELEASE_ACTION == 'BUILD') {
+                        env.ARTIFACT_SOURCE = 'HOMELAB_REUSE'
+                    } else if (env.HOMELAB_RELEASE_ACTION == 'BUILD' && env.GHCR_RELEASE_ACTION == 'REUSE') {
+                        env.ARTIFACT_SOURCE = 'GHCR_REUSE'
+                    } else if (env.HOMELAB_RELEASE_ACTION == 'BUILD') {
+                        // GHCR_RELEASE_ACTION == 'SKIPPED': plain homelab-only
+                        // build, exactly today's behavior.
+                        env.ARTIFACT_SOURCE = 'BUILD'
+                    } else {
+                        // HOMELAB_RELEASE_ACTION == 'REUSE' and
+                        // GHCR_RELEASE_ACTION in {REUSE, SKIPPED}: nothing to
+                        // build, pull, or publish anywhere.
+                        env.ARTIFACT_SOURCE = 'NONE'
+                    }
+                    echo "Artifact source: ${env.ARTIFACT_SOURCE}"
                 }
             }
         }
 
         stage('Build images') {
-            when { environment name: 'RELEASE_ACTION', value: 'BUILD' }
+            // ARTIFACT_SOURCE == 'BUILD' only when both registries need the
+            // same fresh build (or GHCR verification is off and homelab needs
+            // one). Whenever only one registry needs BUILD and the other
+            // already has a proven exact-SHA artifact, that artifact is
+            // pulled and retagged instead — see 'Acquire GHCR source
+            // artifact' and 'Acquire homelab source artifact from GHCR'
+            // below (issue #121: build-once, symmetric across both
+            // registries).
+            when { environment name: 'ARTIFACT_SOURCE', value: 'BUILD' }
             options { timeout(time: 20, unit: 'MINUTES') }
             steps {
-                // BUILD path only. Each image is built exactly once from the
-                // checked-out workspace using the repository Dockerfiles and
-                // their existing build contract. Not rebuilt later.
+                // Each image is built exactly once from the checked-out
+                // workspace using the repository Dockerfiles and their
+                // existing build contract. Not rebuilt later, and never
+                // rebuilt merely to publish to a second registry — GHCR
+                // publication (when needed) retags this same local artifact.
                 //
                 // frontend takes NO --build-arg: frontend/Dockerfile declares
                 // no ARG, and Vite reads frontend/.env.production
@@ -249,8 +411,101 @@ pipeline {
             }
         }
 
-        stage('Publish images') {
-            when { environment name: 'RELEASE_ACTION', value: 'BUILD' }
+        stage('Acquire GHCR source artifact') {
+            // Homelab REUSE + GHCR BUILD only (issue #121). Never rebuilds the
+            // exact Git SHA — a rebuild can legitimately produce a different
+            // manifest digest for the same commit (base image updates,
+            // timestamps, package-repository drift). Instead, pull the
+            // already-published, already-proven homelab exact-SHA images and
+            // publish that same pulled local image artifact to GHCR in
+            // 'Publish images (GHCR)', without rebuilding. Cross-registry
+            // manifest digests are traceability evidence only — they may
+            // legitimately differ and are never asserted equal.
+            when { environment name: 'ARTIFACT_SOURCE', value: 'HOMELAB_REUSE' }
+            options { timeout(time: 10, unit: 'MINUTES') }
+            steps {
+                sh '''
+                    set -eu
+                    docker pull "$BACKEND_IMAGE"
+                    docker pull "$FRONTEND_IMAGE"
+                    docker pull "$SIMULATOR_IMAGE"
+                '''
+                script {
+                    // Traceability evidence only (issue #121 review finding):
+                    // logged for the digest comparison in 'Publish images
+                    // (GHCR)', never used to fail the build on its own —
+                    // cross-registry manifest digest equality is evidence, not
+                    // a hard invariant.
+                    env.SOURCE_BACKEND_DIGEST   = sh(returnStdout: true, script: 'docker inspect --format="{{index .RepoDigests 0}}" "$BACKEND_IMAGE"').trim()
+                    env.SOURCE_FRONTEND_DIGEST  = sh(returnStdout: true, script: 'docker inspect --format="{{index .RepoDigests 0}}" "$FRONTEND_IMAGE"').trim()
+                    env.SOURCE_SIMULATOR_DIGEST = sh(returnStdout: true, script: 'docker inspect --format="{{index .RepoDigests 0}}" "$SIMULATOR_IMAGE"').trim()
+                    echo "Pulled homelab exact-SHA artifacts as the GHCR publish source (no rebuild):"
+                    echo "  backend:   ${env.SOURCE_BACKEND_DIGEST}"
+                    echo "  frontend:  ${env.SOURCE_FRONTEND_DIGEST}"
+                    echo "  simulator: ${env.SOURCE_SIMULATOR_DIGEST}"
+                }
+            }
+        }
+
+        stage('Acquire homelab source artifact from GHCR') {
+            // Homelab BUILD + GHCR REUSE only (issue #121 review finding:
+            // artifact identity must be symmetric with 'Acquire GHCR source
+            // artifact' above). GHCR already has the exact-SHA release set;
+            // do not rebuild it for homelab. Pull the existing GHCR images
+            // and retag them to the canonical homelab refs — 'Publish images
+            // (homelab)' then pushes that same pulled local image artifact,
+            // without rebuilding, completely unchanged from its existing
+            // behavior otherwise. No Kubernetes/Terraform/AWS behavior is
+            // introduced here. Cross-registry manifest digests are
+            // traceability evidence only — they may legitimately differ.
+            when { environment name: 'ARTIFACT_SOURCE', value: 'GHCR_REUSE' }
+            options { timeout(time: 10, unit: 'MINUTES') }
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'ghcr-omnivise-iot-publisher',
+                        usernameVariable: 'GHCR_USERNAME',
+                        passwordVariable: 'GHCR_TOKEN'
+                    )
+                ]) {
+                    sh '''
+                        set -eu
+                        set +x
+
+                        DOCKER_CONFIG="$(mktemp -d)"
+                        export DOCKER_CONFIG
+                        trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+
+                        printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
+
+                        docker pull "$GHCR_BACKEND_IMAGE"
+                        docker pull "$GHCR_FRONTEND_IMAGE"
+                        docker pull "$GHCR_SIMULATOR_IMAGE"
+
+                        docker tag "$GHCR_BACKEND_IMAGE"   "$BACKEND_IMAGE"
+                        docker tag "$GHCR_FRONTEND_IMAGE"  "$FRONTEND_IMAGE"
+                        docker tag "$GHCR_SIMULATOR_IMAGE" "$SIMULATOR_IMAGE"
+
+                        docker logout ghcr.io
+                    '''
+                }
+                script {
+                    // Traceability evidence only, same discipline as the
+                    // opposite direction above — not a hard cross-registry
+                    // digest-equality invariant.
+                    env.SOURCE_BACKEND_DIGEST   = sh(returnStdout: true, script: 'docker inspect --format="{{index .RepoDigests 0}}" "$GHCR_BACKEND_IMAGE"').trim()
+                    env.SOURCE_FRONTEND_DIGEST  = sh(returnStdout: true, script: 'docker inspect --format="{{index .RepoDigests 0}}" "$GHCR_FRONTEND_IMAGE"').trim()
+                    env.SOURCE_SIMULATOR_DIGEST = sh(returnStdout: true, script: 'docker inspect --format="{{index .RepoDigests 0}}" "$GHCR_SIMULATOR_IMAGE"').trim()
+                    echo "Pulled GHCR exact-SHA artifacts as the homelab publish source (no rebuild):"
+                    echo "  backend:   ${env.SOURCE_BACKEND_DIGEST}"
+                    echo "  frontend:  ${env.SOURCE_FRONTEND_DIGEST}"
+                    echo "  simulator: ${env.SOURCE_SIMULATOR_DIGEST}"
+                }
+            }
+        }
+
+        stage('Publish images (homelab)') {
+            when { environment name: 'HOMELAB_RELEASE_ACTION', value: 'BUILD' }
             options { timeout(time: 10, unit: 'MINUTES') }
             steps {
                 // BUILD path only. Under the write-once precheck this only ever
@@ -313,19 +568,107 @@ pipeline {
             }
         }
 
+        stage('Publish images (GHCR)') {
+            // Temporary #121 scaffolding gate, plus GHCR's own BUILD state.
+            // Runs whether the local artifact came from 'Build images' or
+            // 'Acquire GHCR source artifact' (ARTIFACT_SOURCE == BUILD or
+            // HOMELAB_REUSE) — by this point $BACKEND_IMAGE etc. exist locally
+            // either way, so the tag/push steps below are identical.
+            when {
+                allOf {
+                    expression { return params.ENABLE_GHCR_VERIFICATION }
+                    environment name: 'GHCR_RELEASE_ACTION', value: 'BUILD'
+                }
+            }
+            options { timeout(time: 10, unit: 'MINUTES') }
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'ghcr-omnivise-iot-publisher',
+                        usernameVariable: 'GHCR_USERNAME',
+                        passwordVariable: 'GHCR_TOKEN'
+                    )
+                ]) {
+                    // Only the exact-SHA tags — never a mutable alias.
+                    // Partial-publication semantics mirror the homelab stage
+                    // exactly: pushes run under `set -eu` in sequence; a
+                    // mid-sequence failure leaves already-pushed tags in
+                    // place — never deleted, never overwritten, never
+                    // repaired. A later run's GHCR precheck then sees the
+                    // mixed release set and fails closed. No `delete:packages`
+                    // is ever required or used.
+                    sh '''
+                        set -eu
+                        set +x
+
+                        DOCKER_CONFIG="$(mktemp -d)"
+                        export DOCKER_CONFIG
+                        trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+
+                        printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
+
+                        docker tag "$BACKEND_IMAGE"   "$GHCR_BACKEND_IMAGE"
+                        docker tag "$FRONTEND_IMAGE"  "$GHCR_FRONTEND_IMAGE"
+                        docker tag "$SIMULATOR_IMAGE" "$GHCR_SIMULATOR_IMAGE"
+
+                        docker push "$GHCR_BACKEND_IMAGE"
+                        docker push "$GHCR_FRONTEND_IMAGE"
+                        docker push "$GHCR_SIMULATOR_IMAGE"
+
+                        verify_pushed() {
+                            package="$1"
+                            output=$(sh .github/scripts/ghcr-manifest-probe.sh verify "$package" "$GIT_SHA")
+                            digest=$(printf '%s\\n' "$output" | sed -n 's/^DIGEST=//p')
+                            echo "$package published: $GHCR_REGISTRY/$GHCR_NAMESPACE/$package:$GIT_SHA digest=$digest"
+                        }
+
+                        verify_pushed omnivise-iot-backend
+                        verify_pushed omnivise-iot-frontend
+                        verify_pushed omnivise-iot-simulator
+
+                        docker logout ghcr.io
+                    '''
+                }
+                script {
+                    // Traceability evidence only (issue #121 review finding):
+                    // cross-registry manifest digest equality is not asserted
+                    // here — the invariant is "same local artifact, retagged,
+                    // no rebuild," which is guaranteed by ARTIFACT_SOURCE
+                    // above, not by comparing registry-reported digests.
+                    if (env.ARTIFACT_SOURCE == 'HOMELAB_REUSE') {
+                        echo 'GHCR publish source (pulled from homelab, no rebuild):'
+                        echo "  backend:   ${env.SOURCE_BACKEND_DIGEST}"
+                        echo "  frontend:  ${env.SOURCE_FRONTEND_DIGEST}"
+                        echo "  simulator: ${env.SOURCE_SIMULATOR_DIGEST}"
+                    }
+                }
+            }
+        }
+
         stage('Release set ready') {
             options { timeout(time: 1, unit: 'MINUTES') }
             steps {
                 // The exact-SHA release set is now available (built and
-                // published, or reused). The gated Terraform deployment below
-                // consumes exactly these three image references, and the
-                // post-deploy smoke stage afterwards verifies that exactly
-                // these refs are the ones running.
+                // published, or reused) for every registry this run
+                // considered. The gated Terraform deployment below consumes
+                // exactly the homelab image references, and the post-deploy
+                // smoke stage afterwards verifies that exactly those refs are
+                // the ones running. GHCR status is independent and does not
+                // affect Terraform/Kubernetes in any way.
                 script {
-                    if (env.RELEASE_ACTION == 'REUSE') {
-                        echo "REUSE: all three omnivise-iot exact-SHA images already present for ${env.GIT_SHA}; build and push skipped."
+                    if (env.HOMELAB_RELEASE_ACTION == 'REUSE') {
+                        echo "Homelab REUSE: all three omnivise-iot exact-SHA images already present for ${env.GIT_SHA}; build and push skipped."
                     } else {
-                        echo "BUILD: three omnivise-iot exact-SHA images published and verified for ${env.GIT_SHA}."
+                        echo "Homelab BUILD: three omnivise-iot exact-SHA images published and verified for ${env.GIT_SHA}."
+                    }
+                    if (params.ENABLE_GHCR_VERIFICATION) {
+                        if (env.GHCR_RELEASE_ACTION == 'REUSE') {
+                            echo "GHCR REUSE: all three exact-SHA images already present in GHCR for ${env.GIT_SHA}; publish skipped."
+                        } else {
+                            echo "GHCR BUILD: three exact-SHA images published and verified to GHCR for ${env.GIT_SHA}."
+                        }
+                    } else {
+                        echo 'GHCR verification disabled (ENABLE_GHCR_VERIFICATION=false); GHCR publication skipped.'
                     }
                 }
             }

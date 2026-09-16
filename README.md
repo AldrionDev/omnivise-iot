@@ -153,11 +153,25 @@ Jenkins owns delivery (`Jenkinsfile`). `DEPLOY_TARGET` currently offers only
   state, Terraform or state failure, readiness timeout, image mismatch, or smoke
   failure all stop the pipeline. There is no automatic rollback.
 
+Jenkins GHCR publication capability implemented; live acceptance verification
+pending — Jenkins also publishes the same exact-SHA release set to GHCR
+(`ghcr.io/aldriondev/omnivise-iot-<component>:<git-sha>`), independently of the
+homelab registry — a symmetric artifact-source decision guarantees each image
+is still built at most once per run regardless of which registry needs it
+(whichever registry already has the exact-SHA artifact is pulled from and
+republished to the other, never rebuilt). GHCR publication is gated behind a
+temporary, narrowly-scoped `ENABLE_GHCR_VERIFICATION` pipeline parameter
+(default off) that never selects a Terraform root, never triggers an AWS
+apply, and never causes any Kubernetes mutation. The mechanism has not yet
+been exercised against a live Jenkins run or live GHCR state; see
+[`docs/ghcr-release-set-verification.md`](docs/ghcr-release-set-verification.md)
+for exactly what is verified versus still pending.
+
 The AWS EKS **platform foundation** is implemented in `infra/aws-platform/`.
-Application deployment, ingress, GHCR publication, and Jenkins `aws` / `both`
-delivery remain in progress. See
-[Current scope and future direction](#current-scope-and-future-direction) and
-[`docs/aws-eks-platform.md`](docs/aws-eks-platform.md).
+Application deployment, ingress, and Jenkins `aws` / `both` delivery (wiring
+GHCR publication to `DEPLOY_TARGET` and deploying to EKS) remain in progress.
+See [Current scope and future direction](#current-scope-and-future-direction)
+and [`docs/aws-eks-platform.md`](docs/aws-eks-platform.md).
 
 ## Homelab deployment
 
@@ -355,6 +369,12 @@ they are inert and safety rests on maintainer discipline. See
 - Multi-view React/TypeScript monitoring dashboard.
 - GitHub Actions pull-request CI.
 - Jenkins post-merge delivery to k3s homelab target (`DEPLOY_TARGET=homelab`).
+- Jenkins GHCR exact-SHA release-set publication capability implemented; live
+  acceptance verification pending (write-once / build-once / fail-closed,
+  post-push digest verification), independent of `DEPLOY_TARGET` and gated
+  behind a temporary `ENABLE_GHCR_VERIFICATION` verification parameter (issue
+  #121). See
+  [`docs/ghcr-release-set-verification.md`](docs/ghcr-release-set-verification.md).
 
 **Future direction (not implemented)**
 
@@ -377,12 +397,14 @@ Infrastructure:
 - AWS EKS platform foundation: `infra/aws-platform/` with dedicated HCP Terraform
   workspace/state and Local Execution.
 - AWS application deployment remains future work in `infra/aws/`, together with
-  GHCR images and `DEPLOY_TARGET=aws` / `both`.
+  `DEPLOY_TARGET=aws` / `both` and wiring GHCR publication (implemented by
+  issue #121, see above) to that target selection instead of the temporary
+  `ENABLE_GHCR_VERIFICATION` parameter, which issue #122 removes.
 - Declared non-goals for AWS work: no Amazon ECR, no GitHub-to-AWS OIDC.
 - The Jenkins AWS delivery identity and GHCR credential contract is defined,
   provisioned, and verified (least-privilege bootstrap-user-assumes-role,
   namespace-scoped EKS access, no `AdministratorAccess`, no OIDC). AWS
-  application deployment and GHCR image publication remain future work. See
+  application deployment remains future work. See
   [`docs/aws-delivery-identity.md`](docs/aws-delivery-identity.md).
 
 The AWS platform foundation now exists. The remaining items in this section are
