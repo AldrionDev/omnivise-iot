@@ -30,8 +30,8 @@ verification runs.**
 | 2   | GHCR BUILD path (Jenkins run)                               | **Completed**                                        |
 | 3   | GHCR REUSE path (Jenkins run)                               | **Completed**                                        |
 | 4   | Homelab REUSE + GHCR BUILD — pull-not-rebuild (Jenkins run) | **Completed**                                        |
-| 5   | GHCR REUSE + homelab BUILD — pull-not-rebuild (Jenkins run) | Pending                                              |
-| 6   | Partial / fail-closed GHCR state (manual, outside Jenkins)  | Pending                                              |
+| 5   | GHCR REUSE + homelab BUILD — pull-not-rebuild (Jenkins run) | **Completed**                                        |
+| 6   | Partial / fail-closed GHCR state (manual, outside Jenkins)  | **Completed**                                        |
 | 7   | Homelab regression (`ENABLE_GHCR_VERIFICATION=false`)       | **Partially verified**                               |
 | 8   | No Kubernetes/Terraform mutation during GHCR verification   | **Completed for executed Jenkins verification runs** |
 
@@ -286,15 +286,42 @@ artifacts and does not rebuild them.
 
 ## 5. GHCR REUSE + homelab BUILD — pull-not-rebuild path (Jenkins run)
 
-**Status: pending.** Not yet executed. This is the symmetric case to section
-4: the GHCR release set already exists (`GHCR_RELEASE_ACTION = REUSE`) but
-homelab does not (`HOMELAB_RELEASE_ACTION = BUILD`, `ARTIFACT_SOURCE =
-GHCR_REUSE`). This section will record confirmation that `Build images` was
-skipped, `Acquire homelab source artifact from GHCR` pulled the existing GHCR
-images and retagged them to the canonical homelab refs instead of rebuilding,
-and the resulting `SOURCE_*_DIGEST` / `Docker-Content-Digest` (homelab) values
-logged for traceability. This proves artifact identity is preserved
-symmetrically in both pull directions, not only homelab-to-GHCR.
+**Status: completed.**
+
+Verification used revision
+`e1d354eca2a5a2c7ebc89555db387240fb864d2e`.
+
+Before the run, the exact-SHA homelab release set was removed only after
+confirming that each of its three manifest digests was referenced exclusively
+by that revision's tag in the corresponding homelab repository. GHCR already
+contained the complete exact-SHA release set.
+
+Jenkins then observed:
+
+```text
+Homelab release-set precheck: BUILD
+GHCR release-set precheck: REUSE
+Artifact source: GHCR_REUSE
+```
+
+`Build images` was skipped. `Acquire homelab source artifact from GHCR` pulled
+the existing exact-SHA GHCR images and reused them as the homelab publication
+source; no rebuild occurred.
+
+Observed source / publication digests were:
+
+```text
+backend   sha256:dcf3361f9714c428b56f48ed0b512fe69b705698406a15eb1c805e0e7dbb717c
+frontend  sha256:c16a628a7992920287801e212d3f6485afb85d5fc4d7d48ab21cf74dac54ef1e
+simulator sha256:696afdd7026404336eb551677377fbfdab5029e4cbf3a9f91a33e7e5a2cfbce3
+```
+
+The homelab publish completed successfully with the same digests, while the
+GHCR publish stage was skipped because the GHCR release set was already in
+`REUSE` state.
+
+The run reached the saved Terraform-plan approval gate and was aborted there.
+No Terraform apply or Kubernetes mutation was performed.
 
 ## 6. Partial / fail-closed GHCR state (manual, outside Jenkins)
 
