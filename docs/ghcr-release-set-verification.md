@@ -298,20 +298,99 @@ symmetrically in both pull directions, not only homelab-to-GHCR.
 
 ## 6. Partial / fail-closed GHCR state (manual, outside Jenkins)
 
-**Status: pending.** Not yet executed. Per
-[`docs/architecture/delivery-architecture.md`](architecture/delivery-architecture.md)
-section 9, the multibranch Jenkins job builds trusted `main` only, so this
-scenario is exercised without a Jenkins job run at all: a deliberately
-synthetic, non-Git-commit 40-hex identifier is used, exactly one component
-(`omnivise-iot-backend`) is pushed to it manually with the maintainer's own
-personal GHCR credentials (never the Jenkins `ghcr-omnivise-iot-publisher`
-credential), and `.github/scripts/ghcr-manifest-probe.sh` — the identical
-script the Jenkins stages call — is invoked directly against that identifier.
-This section will record the resulting per-component classification (expected:
-`backend=PRESENT, frontend=ABSENT, simulator=ABSENT`, fail-closed exit) and the
-manual cleanup performed afterward through the GitHub Packages web UI.
-`GIT_SHA = git rev-parse HEAD` in the production Jenkinsfile is not exercised
-or altered by this procedure.
+**Status: completed.**
+
+This scenario was exercised manually, outside Jenkins, using the same shared
+GHCR manifest probe script that the production Jenkins pipeline calls:
+
+```text
+.github/scripts/ghcr-manifest-probe.sh
+```
+
+A deliberately synthetic, non-Git-commit 40-hex identifier was generated:
+
+```text
+01db74f29bea1fd94771a609baae923dba7c6214
+```
+
+Only the backend image was published to GHCR under this synthetic tag, using
+the maintainer's own GitHub PAT classic credential with `write:packages`
+permission. The Jenkins credential `ghcr-omnivise-iot-publisher` was not used.
+
+The source backend image was:
+
+```text
+ghcr.io/aldriondev/omnivise-iot-backend:53a8b322700272fdd9c93415e1241f741f82296c
+```
+
+It was retagged and published as:
+
+```text
+ghcr.io/aldriondev/omnivise-iot-backend:01db74f29bea1fd94771a609baae923dba7c6214
+```
+
+Observed digest:
+
+```text
+sha256:fdd3f28b80493b1286bd4551667a3da1cbac1dac8e45149d260de86c8e609a14
+```
+
+No corresponding frontend or simulator tag was published for the synthetic
+identifier.
+
+The three component probes therefore produced:
+
+```text
+backend=PRESENT
+frontend=ABSENT
+simulator=ABSENT
+```
+
+The same aggregation rule used by the Jenkins GHCR precheck was then executed
+manually against those three probe results.
+
+Observed result:
+
+```text
+GHCR release-set precheck failed closed:
+backend=PRESENT frontend=ABSENT simulator=ABSENT
+
+exit_code=1
+```
+
+This confirms the intended fail-closed behavior: a partial release set is
+neither classified as `BUILD` nor `REUSE`; the precheck terminates with a
+non-zero exit code instead.
+
+The production Jenkinsfile was not modified for this test, and no Jenkins job,
+Terraform operation, Kubernetes mutation, or AWS/EKS operation was involved.
+
+### Cleanup note
+
+After the test, the GitHub Packages web UI showed the synthetic tag and the
+real release tag attached to the same GHCR package version / manifest digest:
+
+```text
+01db74f29bea1fd94771a609baae923dba7c6214
+53a8b322700272fdd9c93415e1241f741f82296c
+```
+
+Both referenced:
+
+```text
+sha256:fdd3f28b80493b1286bd4551667a3da1cbac1dac8e45149d260de86c8e609a14
+```
+
+The available GitHub Packages UI deletion action operated on the package
+version rather than offering an unambiguous tag-only removal path. Deleting
+that version would therefore risk removing the legitimate release tag as well.
+
+The test tag was intentionally left in place rather than performing an
+unsafe cleanup operation.
+
+The maintainer PAT used for this verification did not include
+`delete:packages`; this was deliberate and preserved the least-privilege
+boundary established for the test.
 
 ## 7. Homelab regression
 
