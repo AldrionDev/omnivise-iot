@@ -85,6 +85,14 @@ resource "kubernetes_deployment_v1" "backend" {
       }
 
       spec {
+        dynamic "image_pull_secrets" {
+          for_each = var.image_pull_secret_name == null ? [] : [var.image_pull_secret_name]
+
+          content {
+            name = image_pull_secrets.value
+          }
+        }
+
         init_container {
           name    = "mongodb-wait"
           image   = var.mongodb_image
@@ -222,6 +230,14 @@ resource "kubernetes_deployment_v1" "frontend" {
       }
 
       spec {
+        dynamic "image_pull_secrets" {
+          for_each = var.image_pull_secret_name == null ? [] : [var.image_pull_secret_name]
+
+          content {
+            name = image_pull_secrets.value
+          }
+        }
+
         # No init_container. The frontend container now carries exactly one env
         # var, BACKEND_UPSTREAM, set to the backend Service FQDN so Nginx's
         # runtime name lookup (using the DNS server discovered by the #37 image
@@ -340,6 +356,14 @@ resource "kubernetes_deployment_v1" "sensor_simulator" {
       }
 
       spec {
+        dynamic "image_pull_secrets" {
+          for_each = var.image_pull_secret_name == null ? [] : [var.image_pull_secret_name]
+
+          content {
+            name = image_pull_secrets.value
+          }
+        }
+
         init_container {
           name    = "mongodb-wait"
           image   = var.mongodb_image
