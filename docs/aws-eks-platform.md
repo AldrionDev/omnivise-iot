@@ -14,18 +14,22 @@ separately.
 
 The initial platform consists of:
 
-* one VPC in `eu-north-1`;
-* two public subnets across `eu-north-1a` and `eu-north-1b`;
-* one Internet Gateway and public default route;
-* no NAT Gateway;
-* one Amazon EKS cluster running Kubernetes `1.36`;
-* one managed node group using `t3.medium`;
-* node-group scaling of min `1`, desired `1`, max `2`;
-* dedicated Terraform-managed EKS cluster and node IAM roles;
-* an EKS access entry for the approved operator role.
+- one VPC in `eu-north-1`;
+- two public subnets across `eu-north-1a` and `eu-north-1b`;
+- one Internet Gateway and public default route;
+- no NAT Gateway;
+- one Amazon EKS cluster running Kubernetes `1.36`;
+- one managed node group using `t3.medium`;
+- node-group scaling of min `1`, desired `1`, max `2`;
+- dedicated Terraform-managed EKS cluster and node IAM roles;
+- an EKS access entry for the approved operator role.
 
-Application workloads, ingress, load balancers, DNS, GHCR publication, and
-Jenkins AWS delivery are outside this platform root.
+Application workloads and application-specific Ingress resources are managed
+separately by `infra/aws/`.
+
+This platform root owns the cluster-wide AWS Load Balancer Controller capability
+required by AWS application ingress. DNS, TLS certificates, GHCR publication,
+and Jenkins AWS delivery remain outside this platform root.
 
 ## Terraform State Boundary
 
@@ -42,7 +46,7 @@ Terraform provides authoritative remote state and state locking.
 
 There is no local-state fallback.
 
-The future EKS application root is separate:
+The EKS application root is separate:
 
 ```text
 infra/aws/
@@ -105,16 +109,15 @@ access entry and the AWS-managed `AmazonEKSClusterAdminPolicy`.
 This choice avoids requiring a Terraform plan/apply whenever the operator's
 dynamic public IP address changes.
 
-The public OmniVise application endpoint is a separate concern. Application
-Internet exposure will be implemented through the AWS ingress/load-balancer
-layer rather than through the Kubernetes API endpoint.
+The public OmniVise application endpoint is a separate concern.
+Application Internet exposure is implemented through the AWS ingress/load-balancer layer rather than through the Kubernetes API endpoint.
 
 ## IAM
 
 Terraform creates dedicated IAM roles for:
 
-* the EKS control plane;
-* the EKS managed node group.
+- the EKS control plane;
+- the EKS managed node group.
 
 The cluster role trusts `eks.amazonaws.com`.
 
@@ -166,14 +169,14 @@ confirm that the resulting infrastructure is converged.
 
 At minimum verify:
 
-* EKS cluster status is `ACTIVE`;
-* managed node group status is `ACTIVE`;
-* expected worker node becomes Kubernetes `Ready`;
-* cluster version is `1.36`;
-* the two expected public subnets are attached;
-* the operator access entry exists;
-* no unexpected unrestricted worker-node inbound security-group rule exists;
-* a subsequent Terraform plan reports no changes.
+- EKS cluster status is `ACTIVE`;
+- managed node group status is `ACTIVE`;
+- expected worker node becomes Kubernetes `Ready`;
+- cluster version is `1.36`;
+- the two expected public subnets are attached;
+- the operator access entry exists;
+- no unexpected unrestricted worker-node inbound security-group rule exists;
+- a subsequent Terraform plan reports no changes.
 
 `kubectl` is used only for verification. Terraform remains the authoritative
 mutation mechanism.
@@ -196,13 +199,64 @@ terraform apply tfplan
 Do not destroy shared or unrelated AWS resources. The platform Terraform state
 must contain only resources owned by this project.
 
+## AWS Load Balancer Controller Capability
+
+Public application ingress depends on the cluster-wide AWS Load Balancer
+Controller capability managed by:
+
+```text
+infra/aws-platform/
+```
+
+The platform owns:
+
+- AWS Load Balancer Controller Helm release;
+- dedicated IAM role and IAM policy;
+- EKS Pod Identity association for
+  `kube-system/aws-load-balancer-controller`.
+
+The controller is installed from the AWS EKS Helm repository with the chart
+version pinned in Terraform. It uses EKS Pod Identity rather than IRSA/OIDC or
+worker-node IAM permissions.
+
+The controller IAM trust is restricted through Pod Identity request tags to:
+
+```text
+cluster:         omnivise-iot
+namespace:       kube-system
+service account: aws-load-balancer-controller
+```
+
+Application-specific Ingress resources are not owned by this root. They are
+declared by `infra/aws/`; the controller reconciles those Kubernetes resources
+into AWS ALB, target-group, listener, and security-group resources.
+
+The existing EKS cluster security group is also attached to the managed worker
+node. Its self-referencing ingress rule permits the controller webhook traffic
+required between the EKS control plane and worker nodes, including TCP 9443, so
+no additional worker-node ingress rule is required for this capability.
+
+### Runtime Acceptance
+
+Issue #120 verified that:
+
+- the exact saved platform Terraform plan added only the controller IAM role,
+  IAM policy, policy attachment, Pod Identity association, and Helm release;
+- the apply completed with `5 added, 0 changed, 0 destroyed`;
+- both AWS Load Balancer Controller pods reached `1/1 Running`;
+- the expected EKS Pod Identity association exists for
+  `kube-system/aws-load-balancer-controller`;
+- an immediate post-apply Terraform plan reported no changes.
+
+`kubectl` and AWS CLI were used only for read-only verification.
+
 ## EBS CSI Storage Capability
 
 Persistent EBS storage is a platform capability owned by:
 
 ```text
 infra/aws-platform/
-````
+```
 
 The platform manages the following Amazon EKS add-ons for Kubernetes `1.36`:
 
@@ -258,21 +312,21 @@ reclaimPolicy:     Delete
 
 Acceptance proved that:
 
-* the temporary PVC reached `Bound`;
-* the verification pod reached `Running`;
-* the pod successfully mounted the dynamically provisioned EBS volume;
-* a sentinel value could be written to and read back from the mounted filesystem;
-* the resulting PersistentVolume used the `ebs.csi.aws.com` CSI driver;
-* the backing AWS volume used `gp3`;
-* the EBS volume and scheduled Kubernetes node were in the same Availability Zone;
-* the volume carried `ebs.csi.aws.com/cluster-name=omnivise-iot`;
-* deleting the temporary PVC deleted the PersistentVolume;
-* deleting the temporary PVC also deleted the backing EBS volume;
-* the temporary StorageClass and namespace were deleted;
-* no acceptance-test Kubernetes or EBS resources remained afterward.
+- the temporary PVC reached `Bound`;
+- the verification pod reached `Running`;
+- the pod successfully mounted the dynamically provisioned EBS volume;
+- a sentinel value could be written to and read back from the mounted filesystem;
+- the resulting PersistentVolume used the `ebs.csi.aws.com` CSI driver;
+- the backing AWS volume used `gp3`;
+- the EBS volume and scheduled Kubernetes node were in the same Availability Zone;
+- the volume carried `ebs.csi.aws.com/cluster-name=omnivise-iot`;
+- deleting the temporary PVC deleted the PersistentVolume;
+- deleting the temporary PVC also deleted the backing EBS volume;
+- the temporary StorageClass and namespace were deleted;
+- no acceptance-test Kubernetes or EBS resources remained afterward.
 
 MongoDB and other application workloads remain outside this platform root.
-They will be owned by the separate AWS application Terraform root.
+They are owned by the separate AWS application Terraform root.
 
 After acceptance, a fresh Terraform plan reported:
 

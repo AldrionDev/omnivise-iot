@@ -37,3 +37,8 @@ output "simulator_image_ref" {
   description = "Exact-SHA GHCR simulator image deployed by this root."
   value       = var.simulator_image_ref
 }
+
+output "frontend_ingress_hostname" {
+  description = "AWS-generated public ALB hostname for the OmniVise frontend."
+  value       = kubernetes_ingress_v1.frontend.status[0].load_balancer[0].ingress[0].hostname
+}
