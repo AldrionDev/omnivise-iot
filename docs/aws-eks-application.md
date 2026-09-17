@@ -82,8 +82,6 @@ required EKS access entry and authorization can be used.
 The AWS application root manages:
 
 - `omnivise-iot` Kubernetes namespace (`namespace.tf`)
-- `omnivise-iot-gp3` StorageClass using the `ebs.csi.aws.com` provisioner
-  (`storage.tf`)
 - MongoDB StatefulSet, Service, and bootstrap Jobs through the shared
   `../modules/application` module
 - backend Deployment and Service
@@ -91,6 +89,12 @@ The AWS application root manages:
 - sensor simulator Deployment
 - `ghcr-pull` GHCR image-pull Secret (`registry.tf`)
 - public ALB-backed Kubernetes Ingress for the frontend (`ingress.tf`)
+
+The `omnivise-iot-gp3` StorageClass used by the MongoDB PVC is cluster-scoped
+and is owned by `infra/aws-platform/` instead, since the Jenkins AWS delivery
+identity is intentionally namespace-scoped. This root only references the
+StorageClass by its known name (`local.mongodb_storage_class`); it does not
+manage the resource. See [AWS EKS Platform](./aws-eks-platform.md#ebs-csi-storage-capability).
 
 ## Exact-SHA Image Contract
 
@@ -401,7 +405,7 @@ Not implemented by this root:
 | `mongodb_service_name`      | Cluster-internal MongoDB Service name                      |
 | `mongodb_port`              | TCP port MongoDB listens on                                |
 | `mongodb_replica_set_name`  | MongoDB replica-set name                                   |
-| `mongodb_storage_class`     | AWS EBS-backed StorageClass used by the MongoDB PVC        |
+| `mongodb_storage_class`     | Name of the platform-owned AWS EBS-backed StorageClass used by the MongoDB PVC |
 | `backend_image_ref`         | Exact-SHA GHCR backend image deployed by this root         |
 | `frontend_image_ref`        | Exact-SHA GHCR frontend image deployed by this root        |
 | `simulator_image_ref`       | Exact-SHA GHCR simulator image deployed by this root       |

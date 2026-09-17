@@ -19,8 +19,8 @@ output "mongodb_replica_set_name" {
 }
 
 output "mongodb_storage_class" {
-  description = "AWS EBS-backed StorageClass used by the MongoDB PVC."
-  value       = kubernetes_storage_class_v1.gp3.metadata[0].name
+  description = "Name of the platform-owned AWS EBS-backed StorageClass used by the MongoDB PVC. The StorageClass itself is managed by infra/aws-platform; this root only references it by name."
+  value       = local.mongodb_storage_class
 }
 
 output "backend_image_ref" {

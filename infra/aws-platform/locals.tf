@@ -17,4 +17,6 @@ locals {
   }
 
   node_group_name = "${local.application}-${var.environment}"
+
+  gp3_storage_class_name = "omnivise-iot-gp3"
 }
