@@ -31,23 +31,8 @@ run "application_contract" {
   }
 
   assert {
-    condition     = kubernetes_storage_class_v1.gp3.storage_provisioner == "ebs.csi.aws.com"
-    error_message = "The AWS application StorageClass must use the Amazon EBS CSI provisioner."
-  }
-
-  assert {
-    condition     = kubernetes_storage_class_v1.gp3.parameters["type"] == "gp3"
-    error_message = "The AWS application StorageClass must provision gp3 volumes."
-  }
-
-  assert {
-    condition     = kubernetes_storage_class_v1.gp3.volume_binding_mode == "WaitForFirstConsumer"
-    error_message = "The AWS application StorageClass must use WaitForFirstConsumer volume binding."
-  }
-
-  assert {
-    condition     = kubernetes_storage_class_v1.gp3.reclaim_policy == "Delete"
-    error_message = "The AWS application StorageClass must use Delete reclaim policy."
+    condition     = local.mongodb_storage_class == "omnivise-iot-gp3"
+    error_message = "The AWS application root must reference the platform-owned StorageClass by its known name."
   }
 
   assert {

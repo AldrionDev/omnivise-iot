@@ -1,4 +1,5 @@
 mock_provider "aws" {}
+mock_provider "kubernetes" {}
 
 run "storage_contract" {
   command = plan
@@ -78,5 +79,34 @@ run "storage_contract" {
   assert {
     condition     = jsondecode(aws_iam_role.ebs_csi.assume_role_policy).Statement[0].Condition.StringEquals["aws:RequestTag/kubernetes-service-account"] == "ebs-csi-controller-sa"
     error_message = "The EBS CSI trust must be restricted to ebs-csi-controller-sa."
+  }
+}
+
+run "storage_class_contract" {
+  command = plan
+
+  assert {
+    condition     = kubernetes_storage_class_v1.gp3.metadata[0].name == "omnivise-iot-gp3"
+    error_message = "The platform-owned StorageClass must keep its known contract name."
+  }
+
+  assert {
+    condition     = kubernetes_storage_class_v1.gp3.storage_provisioner == "ebs.csi.aws.com"
+    error_message = "The platform-owned StorageClass must use the Amazon EBS CSI provisioner."
+  }
+
+  assert {
+    condition     = kubernetes_storage_class_v1.gp3.parameters["type"] == "gp3"
+    error_message = "The platform-owned StorageClass must provision gp3 volumes."
+  }
+
+  assert {
+    condition     = kubernetes_storage_class_v1.gp3.volume_binding_mode == "WaitForFirstConsumer"
+    error_message = "The platform-owned StorageClass must use WaitForFirstConsumer volume binding."
+  }
+
+  assert {
+    condition     = kubernetes_storage_class_v1.gp3.reclaim_policy == "Delete"
+    error_message = "The platform-owned StorageClass must use Delete reclaim policy."
   }
 }

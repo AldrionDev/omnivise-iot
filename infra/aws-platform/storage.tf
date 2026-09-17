@@ -1,6 +1,6 @@
 resource "kubernetes_storage_class_v1" "gp3" {
   metadata {
-    name = local.mongodb_storage_class
+    name = local.gp3_storage_class_name
 
     labels = {
       "app.kubernetes.io/name"       = local.application

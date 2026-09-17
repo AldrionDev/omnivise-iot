@@ -299,6 +299,21 @@ policy. EBS CSI permissions are not attached to the EKS worker-node IAM role.
 
 The EBS CSI add-on owns the Pod Identity association.
 
+The platform also owns the persistent, cluster-scoped `omnivise-iot-gp3`
+StorageClass (`storage.tf`) consumed by the MongoDB PVC in
+`infra/aws/`. This ownership is intentional: the Jenkins AWS delivery identity
+for `infra/aws/` is namespace-scoped via EKS access entry and cannot manage
+cluster-scoped `storageclasses.storage.k8s.io` resources. `infra/aws/` only
+references the StorageClass by its known name; it does not manage the
+resource.
+
+```text
+provisioner:       ebs.csi.aws.com
+type:              gp3
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy:     Delete
+```
+
 ### Runtime Acceptance
 
 Issue #126 verified dynamic EBS provisioning with a temporary StorageClass using:
