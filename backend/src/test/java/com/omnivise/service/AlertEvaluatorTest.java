@@ -246,6 +246,26 @@ class AlertEvaluatorTest {
     }
 
     @Test
+    void staleRecoveredFiringAfterResolveCasMissDoesNotSuppressLaterBreach() {
+        AlertEvent recovered = new AlertEvent("64b7f00000000000000000aa", 42L,
+                VOLTAGE_LOW.ruleId(), "ups-1", "input_voltage", "critical", "firing",
+                2.0, 2.0, "2026-09-10T07:55:00Z", null);
+        when(alertService.findFiring()).thenReturn(List.of(recovered));
+        doReturn(Optional.empty()).when(alertService).resolve(any(), anyDouble(), anyString());
+        when(alertService.updateLastValue(any(), anyDouble())).thenReturn(false);
+
+        AlertEvaluator evaluator = evaluator();
+
+        evaluator.evaluate(reading(231.0));
+        evaluator.evaluate(reading(1.5));
+
+        verify(alertService).insertFiring(any());
+        verify(wsHandler).broadcast(any(AlertMessage.class));
+        assertEquals(1, webhook.events.size());
+        assertEquals(AlertEvent.STATE_FIRING, webhook.events.getFirst().state());
+    }
+
+    @Test
     void resolveCasMissKeepsFiringAndEmitsNoResolvedSideEffects() {
         AlertEvaluator evaluator = evaluator();
         evaluator.evaluate(reading(2.1));
