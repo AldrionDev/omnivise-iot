@@ -10,6 +10,8 @@ import org.bson.Document;
 import org.bson.conversions.Bson;
 import org.bson.types.ObjectId;
 
+import com.mongodb.ErrorCategory;
+import com.mongodb.MongoServerException;
 import com.mongodb.ReadConcern;
 import com.mongodb.TransactionOptions;
 import com.mongodb.WriteConcern;
@@ -67,10 +69,16 @@ public class AlertService {
         this.sequences = sequences;
     }
 
-    /** Inserts a firing transition and allocates its sequence atomically. */
-    public AlertEvent insertFiring(AlertEvent pending) {
+    /**
+     * Inserts a firing transition and allocates its sequence atomically.
+     *
+     * <p>Returns empty when another writer already owns the firing lifecycle for
+     * the same {@code (ruleId, deviceId, channel)}: the partial unique index
+     * rejects the insert and the aborted transaction also rolls back the sequence.
+     */
+    public Optional<AlertEvent> insertFiring(AlertEvent pending) {
         try (ClientSession session = mongoClient.startSession()) {
-            return session.withTransaction(() -> {
+            return Optional.of(session.withTransaction(() -> {
                 long sequence = nextSequence(session);
                 AlertEvent persisted = new AlertEvent(new ObjectId().toHexString(), sequence,
                         pending.ruleId(), pending.deviceId(), pending.channel(), pending.severity(),
@@ -78,8 +86,23 @@ public class AlertService {
                         pending.startedAt(), null);
                 events.insertOne(session, AlertEventMapper.toDocument(persisted));
                 return persisted;
-            }, TRANSACTION_OPTIONS);
+            }, TRANSACTION_OPTIONS));
+        } catch (MongoServerException e) {
+            if (ErrorCategory.fromErrorCode(e.getCode()) == ErrorCategory.DUPLICATE_KEY) {
+                return Optional.empty();
+            }
+            throw e;
         }
+    }
+
+    /** Returns the persisted firing lifecycle for one logical alert, if any. */
+    public Optional<AlertEvent> findFiring(String ruleId, String deviceId, String channel) {
+        Document doc = events.find(Filters.and(
+                Filters.eq("ruleId", ruleId),
+                Filters.eq("deviceId", deviceId),
+                Filters.eq("channel", channel),
+                Filters.eq("state", AlertEvent.STATE_FIRING))).first();
+        return Optional.ofNullable(doc).map(AlertEventMapper::fromDocument);
     }
 
     /** Resolves exactly the expected firing version, or returns empty on a stale CAS. */

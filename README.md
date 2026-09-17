@@ -234,6 +234,13 @@ cd frontend   && npm ci && npm run lint && npm test && npm run build
 docker compose config
 ```
 
+MongoDB-backed checks (require the local Compose replica set to be running):
+
+```
+cd backend && MONGO_INTEGRATION_URI='mongodb://localhost:27017/?replicaSet=rs0&directConnection=true' mvn test
+tests/mongo-alert-firing-uniqueness.test.sh
+```
+
 ## REST API and WebSocket
 
 ### WebSocket
@@ -299,6 +306,14 @@ same MongoDB snapshot: the body reflects all committed alert transitions through
 the watermark. Clients may apply only transitions with `sequence` greater than
 that watermark after installing a snapshot. Legacy persisted alerts without a
 sequence are exposed with sequence `0`.
+
+MongoDB owns the active alert lifecycle: a partial unique index
+(`uniq_firing_rule_device_channel`) allows at most one `firing` event per
+`(ruleId, deviceId, channel)`, while resolved history is unlimited. When several
+backend replicas evaluate the same reading (e.g. during a rolling deployment),
+exactly one persists and emits the transition; the others adopt the persisted
+event without emitting. `mongo-init.js` adds the index to existing databases and
+fails the bootstrap, without deleting data, if duplicate firing events already exist.
 
 ## Frontend Routes
 

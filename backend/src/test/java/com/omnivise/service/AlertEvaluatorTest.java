@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.inOrder;
@@ -26,6 +27,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.bson.Document;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
 import com.omnivise.handler.AlertMessage;
@@ -59,9 +61,9 @@ class AlertEvaluatorTest {
             AlertEvent event = inv.getArgument(0);
             long next = sequence.incrementAndGet();
             String id = String.format("64b7f0000000000000%06d", next);
-            return new AlertEvent(id, next, event.ruleId(), event.deviceId(),
+            return Optional.of(new AlertEvent(id, next, event.ruleId(), event.deviceId(),
                     event.channel(), event.severity(), event.state(), event.triggeredValue(),
-                    event.lastValue(), event.startedAt(), event.resolvedAt());
+                    event.lastValue(), event.startedAt(), event.resolvedAt()));
         });
         when(alertService.updateLastValue(any(), anyDouble())).thenReturn(true);
         when(alertService.resolve(any(), anyDouble(), anyString())).thenAnswer(inv -> {
@@ -112,6 +114,27 @@ class AlertEvaluatorTest {
         verify(wsHandler, times(1)).broadcast(any(AlertMessage.class));
         assertEquals(1L, sequence.get());
         assertEquals(1, webhook.events.size());
+    }
+
+    @Test
+    void repeatedBreachCasMissDropsStaleStateSoLaterBreachCreatesNewLifecycle() {
+        AlertEvaluator evaluator = evaluator();
+        evaluator.evaluate(reading(2.1));
+        when(alertService.updateLastValue(any(), anyDouble())).thenReturn(false);
+
+        evaluator.evaluate(reading(1.8));
+
+        verify(alertService, times(1)).insertFiring(any());
+        verify(alertService).updateLastValue(any(), anyDouble());
+        verify(wsHandler, times(1)).broadcast(any(AlertMessage.class));
+        assertEquals(1, webhook.events.size());
+
+        evaluator.evaluate(reading(1.5));
+
+        verify(alertService, times(2)).insertFiring(any());
+        verify(wsHandler, times(2)).broadcast(any(AlertMessage.class));
+        assertEquals(2, webhook.events.size());
+        assertNotEquals(webhook.events.get(0).id(), webhook.events.get(1).id());
     }
 
     @Test
@@ -217,7 +240,7 @@ class AlertEvaluatorTest {
                 VOLTAGE_LOW.ruleId(), "ups-1", "input_voltage", "critical", "firing",
                 2.0, 2.0, "2026-09-10T08:00:00Z", null);
         doThrow(new IllegalStateException("transaction failed"))
-                .doReturn(committed)
+                .doReturn(Optional.of(committed))
                 .when(alertService).insertFiring(any());
 
         AlertEvaluator evaluator = evaluator();
@@ -246,7 +269,27 @@ class AlertEvaluatorTest {
     }
 
     @Test
-    void resolveCasMissKeepsFiringAndEmitsNoResolvedSideEffects() {
+    void staleRecoveredFiringAfterResolveCasMissDoesNotSuppressLaterBreach() {
+        AlertEvent recovered = new AlertEvent("64b7f00000000000000000aa", 42L,
+                VOLTAGE_LOW.ruleId(), "ups-1", "input_voltage", "critical", "firing",
+                2.0, 2.0, "2026-09-10T07:55:00Z", null);
+        when(alertService.findFiring()).thenReturn(List.of(recovered));
+        doReturn(Optional.empty()).when(alertService).resolve(any(), anyDouble(), anyString());
+        when(alertService.updateLastValue(any(), anyDouble())).thenReturn(false);
+
+        AlertEvaluator evaluator = evaluator();
+
+        evaluator.evaluate(reading(231.0));
+        evaluator.evaluate(reading(1.5));
+
+        verify(alertService).insertFiring(any());
+        verify(wsHandler).broadcast(any(AlertMessage.class));
+        assertEquals(1, webhook.events.size());
+        assertEquals(AlertEvent.STATE_FIRING, webhook.events.getFirst().state());
+    }
+
+    @Test
+    void resolveCasMissDropsStaleStateSoLaterBreachCreatesNewLifecycle() {
         AlertEvaluator evaluator = evaluator();
         evaluator.evaluate(reading(2.1));
         doReturn(Optional.empty()).when(alertService).resolve(any(), anyDouble(), anyString());
@@ -255,8 +298,68 @@ class AlertEvaluatorTest {
 
         verify(wsHandler, times(1)).broadcast(any(AlertMessage.class));
         assertEquals(1, webhook.events.size());
+
         evaluator.evaluate(reading(1.5));
-        verify(alertService).updateLastValue(any(), anyDouble());
+
+        verify(alertService, times(2)).insertFiring(any());
+        verify(alertService, never()).updateLastValue(any(), anyDouble());
+        verify(wsHandler, times(2)).broadcast(any(AlertMessage.class));
+        assertEquals(2, webhook.events.size());
+        assertEquals(List.of("firing", "firing"),
+                webhook.events.stream().map(AlertEvent::state).toList());
+        assertNotEquals(webhook.events.get(0).id(), webhook.events.get(1).id());
+    }
+
+    @Test
+    void lostFiringInsertAdoptsPersistedWinnerWithoutEmittingADuplicateTransition() {
+        AlertEvent winner = new AlertEvent("64b7f00000000000000000cc", 7L,
+                VOLTAGE_LOW.ruleId(), "ups-1", "input_voltage", "critical", "firing",
+                2.0, 2.0, "2026-09-10T07:59:59Z", null);
+        doReturn(Optional.empty()).when(alertService).insertFiring(any());
+        when(alertService.findFiring(VOLTAGE_LOW.ruleId(), "ups-1", "input_voltage"))
+                .thenReturn(Optional.of(winner));
+        doReturn(Optional.empty()).when(alertService).resolve(any(), anyDouble(), anyString());
+        AlertEvaluator evaluator = evaluator();
+
+        evaluator.evaluate(reading(2.1));
+
+        verifyNoInteractions(wsHandler);
+        assertTrue(webhook.events.isEmpty());
+
+        evaluator.evaluate(reading(1.8));
+        evaluator.evaluate(reading(231.0));
+
+        verify(alertService, times(1)).insertFiring(any());
+        verify(alertService).updateLastValue(winner, 1.8);
+        ArgumentCaptor<AlertEvent> resolved = ArgumentCaptor.forClass(AlertEvent.class);
+        verify(alertService).resolve(resolved.capture(), eq(231.0), anyString());
+        assertEquals(winner.id(), resolved.getValue().id());
+        assertEquals(winner.sequence(), resolved.getValue().sequence());
+        verifyNoInteractions(wsHandler);
+        assertTrue(webhook.events.isEmpty());
+    }
+
+    @Test
+    void lostFiringInsertWithVanishedWinnerKeepsNoStateAndFiresOnNextBreach() {
+        AlertEvaluator evaluator = evaluator();
+        doReturn(Optional.empty()).when(alertService).insertFiring(any());
+
+        evaluator.evaluate(reading(2.1));
+
+        verify(alertService).findFiring(VOLTAGE_LOW.ruleId(), "ups-1", "input_voltage");
+        verifyNoInteractions(wsHandler);
+        assertTrue(webhook.events.isEmpty());
+
+        doReturn(Optional.of(new AlertEvent("64b7f00000000000000000dd", 9L,
+                VOLTAGE_LOW.ruleId(), "ups-1", "input_voltage", "critical", "firing",
+                1.5, 1.5, "2026-09-10T08:00:00Z", null)))
+                .when(alertService).insertFiring(any());
+        evaluator.evaluate(reading(1.5));
+
+        verify(alertService, times(2)).insertFiring(any());
+        verify(alertService, never()).updateLastValue(any(), anyDouble());
+        verify(wsHandler).broadcast(any(AlertMessage.class));
+        assertEquals(List.of(9L), webhook.events.stream().map(AlertEvent::sequence).toList());
     }
 
     @Test
