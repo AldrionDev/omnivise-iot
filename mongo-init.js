@@ -478,6 +478,95 @@ function alertSequenceBootstrap() {
   }
 }
 
+// Active alert lifecycle ownership: at most one `firing` alert_events document
+// per logical alert (ruleId, deviceId, channel). Every backend replica consumes
+// the same Change Stream, so this index — not in-memory evaluator state — is
+// what prevents duplicate lifecycles during a rolling deployment. It is partial,
+// so resolved history per logical alert stays unlimited.
+//
+// Additive and fail-closed: an existing firing duplicate is reported and the
+// bootstrap exits non-zero; no alert document is ever deleted or rewritten.
+const FIRING_ALERT_UNIQUE_INDEX = {
+  key: { ruleId: 1, deviceId: 1, channel: 1 },
+  name: "uniq_firing_rule_device_channel",
+  partialFilterExpression: { state: "firing" },
+};
+
+function hasFiringAlertUniqueIndex(ix) {
+  return (
+    ix.unique === true &&
+    indexKeyString(ix.key) === indexKeyString(FIRING_ALERT_UNIQUE_INDEX.key) &&
+    JSON.stringify(ix.partialFilterExpression) ===
+      JSON.stringify(FIRING_ALERT_UNIQUE_INDEX.partialFilterExpression)
+  );
+}
+
+function alertFiringUniquenessBootstrap() {
+  const wanted = FIRING_ALERT_UNIQUE_INDEX;
+  const existing = db.alert_events
+    .getIndexes()
+    .find((ix) => ix.name === wanted.name);
+  if (existing) {
+    if (!hasFiringAlertUniqueIndex(existing)) {
+      reportAndExit(
+        [
+          "alert_events: index '" +
+            wanted.name +
+            "' exists with an unexpected definition " +
+            JSON.stringify(existing),
+        ],
+        "alert firing uniqueness index is inconsistent",
+      );
+    }
+    print("✅ alert firing uniqueness index present");
+    return;
+  }
+
+  const duplicates = db.alert_events
+    .aggregate([
+      { $match: { state: "firing" } },
+      {
+        $group: {
+          _id: { ruleId: "$ruleId", deviceId: "$deviceId", channel: "$channel" },
+          ids: { $push: "$_id" },
+          count: { $sum: 1 },
+        },
+      },
+      { $match: { count: { $gt: 1 } } },
+    ])
+    .toArray();
+  if (duplicates.length) {
+    reportAndExit(
+      duplicates.map(
+        (d) =>
+          "alert_events: " +
+          d.count +
+          " firing events for " +
+          JSON.stringify(d._id) +
+          " (ids " +
+          d.ids.map((id) => id.toString()).join(", ") +
+          ")",
+      ),
+      "duplicate firing alerts prevent the firing uniqueness index",
+    );
+  }
+
+  try {
+    db.alert_events.createIndex(wanted.key, {
+      name: wanted.name,
+      unique: true,
+      partialFilterExpression: wanted.partialFilterExpression,
+    });
+  } catch (e) {
+    // e.g. a duplicate firing event written concurrently by a running backend.
+    reportAndExit(
+      ["alert_events: " + e],
+      "alert firing uniqueness index creation failed",
+    );
+  }
+  print("✅ alert firing uniqueness index created");
+}
+
 function alertBootstrap() {
   const rulesCount = db.alert_rules.countDocuments();
   const eventsExist = db.getCollectionNames().indexOf("alert_events") !== -1;
@@ -654,5 +743,6 @@ if (isFresh) {
 // non-zero (reportAndExit).
 alertBootstrap();
 alertSequenceBootstrap();
+alertFiringUniquenessBootstrap();
 
 quit(0);

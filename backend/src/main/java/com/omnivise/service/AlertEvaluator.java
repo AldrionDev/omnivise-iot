@@ -23,6 +23,11 @@ import com.omnivise.webhook.AlertWebhook;
  * breaches only update {@code lastValue}, and clearing past the hysteresis
  * threshold transitions the same document to {@code resolved}.
  *
+ * <p>MongoDB, not this in-memory map, owns the active lifecycle: several
+ * replicas may evaluate the same reading. A partial unique index allows one
+ * {@code firing} document per key; a lost insert race adopts the persisted
+ * winner without emitting, and a CAS miss drops the stale local entry.
+ *
  * <p>Transition ordering is strict: <em>persist</em> the DB write, <em>then</em>
  * update the in-memory firing map, <em>then</em> emit the {@code {kind:"alert"}}
  * WS envelope, <em>then</em> dispatch the webhook. A DB write that throws leaves
@@ -116,8 +121,12 @@ public class AlertEvaluator {
                 reading.channel(), rule.severity(), AlertEvent.STATE_FIRING,
                 value, value, startedAt, null);
 
-        AlertEvent persisted = alertService.insertFiring(pending);                       // (1) persist
-        firing.put(key, persisted);                                                     // (2) state
+        AlertEvent persisted = alertService.insertFiring(pending).orElse(null);          // (1) persist
+        if (persisted == null) {
+            adoptPersistedFiring(key);
+            return;
+        }
+        firing.put(key, persisted);                                                    // (2) state
         wsHandler.broadcast(AlertMessage.of(persisted));                                // (3) WS
         safeDispatch(persisted);                                                        // (4) webhook
     }
@@ -126,6 +135,7 @@ public class AlertEvaluator {
         String resolvedAt = clock.get().toString();
         AlertEvent resolved = alertService.resolve(current, value, resolvedAt).orElse(null); // (1) persist
         if (resolved == null) {
+            firing.remove(key);                                                         // stale local state
             return;
         }
 
@@ -137,8 +147,21 @@ public class AlertEvaluator {
     private void onRepeatedBreach(double value, Key key, AlertEvent current) {
         if (alertService.updateLastValue(current, value)) {                              // persist only
             firing.put(key, withLastValue(current, value));
+        } else {
+            firing.remove(key);                                                         // stale local state
         }
-        // no state change, no WS, no webhook
+        // no transition, no WS, no webhook
+    }
+
+    /**
+     * Another writer (e.g. a second replica on the same Change Stream) owns the
+     * firing lifecycle: track the persisted winner so later CAS writes target its
+     * id/sequence, and emit nothing — the owner already emitted the transition.
+     * If the winner is already gone, keep no state; the next breach fires again.
+     */
+    private void adoptPersistedFiring(Key key) {
+        alertService.findFiring(key.ruleId(), key.deviceId(), key.channel())
+                .ifPresent(winner -> firing.put(key, winner));
     }
 
     private void safeDispatch(AlertEvent event) {

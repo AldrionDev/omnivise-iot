@@ -2,6 +2,7 @@ package com.omnivise.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -17,9 +18,11 @@ import java.time.Instant;
 import java.util.Date;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
+import org.bson.BsonDocument;
 import org.bson.Document;
 import org.bson.conversions.Bson;
 import org.bson.types.ObjectId;
@@ -28,7 +31,10 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
+import com.mongodb.MongoWriteException;
+import com.mongodb.ServerAddress;
 import com.mongodb.TransactionOptions;
+import com.mongodb.WriteError;
 import com.mongodb.ReadConcern;
 import com.mongodb.client.ClientSession;
 import com.mongodb.client.FindIterable;
@@ -63,7 +69,7 @@ class AlertServiceTest {
 
     @Test
     void transitionSequenceIsAllocatedAndPersistedInTheSameSession() {
-        AlertEvent firing = service.insertFiring(pending());
+        AlertEvent firing = service.insertFiring(pending()).orElseThrow();
         when(events.updateOne(any(ClientSession.class), any(Bson.class), any(Bson.class)))
                 .thenReturn(UpdateResult.acknowledged(1, 1L, null));
 
@@ -91,6 +97,41 @@ class AlertServiceTest {
         assertThrows(IllegalStateException.class, () -> service.insertFiring(pending()));
         verify(sequences).findOneAndUpdate(org.mockito.ArgumentMatchers.same(session),
                 any(Bson.class), any(Bson.class), any(FindOneAndUpdateOptions.class));
+    }
+
+    @Test
+    void duplicateFiringInsertReturnsEmptySoTheCallerCanAdoptTheWinner() {
+        org.mockito.Mockito.doThrow(writeError(11000))
+                .when(events).insertOne(any(ClientSession.class), any(Document.class));
+
+        assertTrue(service.insertFiring(pending()).isEmpty());
+    }
+
+    @Test
+    void nonDuplicateWriteErrorStillEscapesInsert() {
+        MongoWriteException failure = writeError(121);
+        org.mockito.Mockito.doThrow(failure)
+                .when(events).insertOne(any(ClientSession.class), any(Document.class));
+
+        assertSame(failure, assertThrows(MongoWriteException.class, () -> service.insertFiring(pending())));
+    }
+
+    @Test
+    void findFiringByLogicalKeyMapsThePersistedLifecycle() {
+        FindIterable<Document> found = mock(FindIterable.class);
+        when(events.find(any(Bson.class))).thenReturn(found);
+        when(found.first()).thenReturn(eventDoc(7L));
+
+        AlertEvent winner = service.findFiring("rule-1", "ups-1", "input_voltage").orElseThrow();
+
+        assertEquals(7L, winner.sequence());
+        ArgumentCaptor<Bson> filter = ArgumentCaptor.forClass(Bson.class);
+        verify(events).find(filter.capture());
+        String json = filter.getValue().toBsonDocument().toJson();
+        assertTrue(json.contains("\"ruleId\": \"rule-1\""));
+        assertTrue(json.contains("\"deviceId\": \"ups-1\""));
+        assertTrue(json.contains("\"channel\": \"input_voltage\""));
+        assertTrue(json.contains("\"state\": \"firing\""));
     }
 
     @Test
@@ -193,6 +234,11 @@ class AlertServiceTest {
             return null;
         }).when(iterable).forEach(any(Consumer.class));
         return iterable;
+    }
+
+    private static MongoWriteException writeError(int code) {
+        return new MongoWriteException(new WriteError(code, "write failed", new BsonDocument()),
+                new ServerAddress(), Set.of());
     }
 
     private static AlertEvent pending() {
