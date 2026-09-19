@@ -1,6 +1,7 @@
 # AWS Delivery Identity Contract
 
-**Status:** Accepted, provisioned, and verified (issue #118)
+**Status:** Accepted, provisioned, and verified (issue #118); GHCR and shared
+HCP Terraform delivery credentials rotated and documented (issue #137)
 **Scope:** Jenkins AWS authentication/authorization and Jenkins/GHCR credential
 contract for the future AWS EKS application delivery path.
 **Relationship to other documents:** This document is the detailed reference for
@@ -30,6 +31,20 @@ distinct from the scope of issue #118 as a whole, which is now complete:
 No separate tracking issue exists for the provisioning step described above;
 it was tracked and completed as part of issue #118 itself, not as independent
 work.
+
+### Issue #137 scope
+
+Issue #137 is a documentation-only follow-up. It rotated the two GHCR
+credentials (`ghcr-omnivise-iot-publisher`, `ghcr-omnivise-iot-pull`) and the
+shared HCP Terraform credential this project consumes (`hcp-terraform-cli`),
+and extended this document to describe the pull credential and the HCP
+Terraform credential's cross-repository lifecycle, neither of which was
+previously covered here. It made no change to the AWS delivery identity
+(section 2), the AWS authentication constraints (section 3), the
+`infra/aws/` Terraform resources, any Jenkins job, or the existing documented
+flow of the GHCR pull credential into HCP Terraform state through the
+`infra/aws/` application root (`docs/aws-eks-application.md`) — that flow is
+unchanged and out of scope here.
 
 ## 1. Why a dedicated identity is required
 
@@ -144,15 +159,34 @@ ownership problem entirely (delivery-architecture section 15).
 GitHub Actions remains pull-request CI only. Jenkins remains the sole post-merge
 delivery authority, exactly as for the homelab target.
 
-## 4. GHCR credential contract
+## 4. GHCR credential contracts
+
+Two separate GHCR credentials exist, with different purposes and different
+scope requirements. They must not be conflated or substituted for each other.
+
+### 4.1 Publisher credential: `ghcr-omnivise-iot-publisher`
 
 | Property | Value |
 | --- | --- |
 | Jenkins credential ID | `ghcr-omnivise-iot-publisher` |
 | GitHub/GHCR identity | `AldrionDev` |
 | Credential type | GitHub Personal Access Token (classic) |
-| Required scope | `write:packages` |
-| Explicitly not required | `delete:packages`; broad repository permissions |
+| Intended scope | `write:packages` |
+| Observed scopes (current token) | `repo`, `write:packages` |
+| Expiration | No expiration set |
+| Explicitly not required | `delete:packages` |
+
+**This credential is not minimally scoped.** Its currently observed scopes
+are exactly `repo` and `write:packages`. During the issue #137 rotation, the
+`repo` scope was observed alongside `write:packages` when the replacement PAT
+was created through GitHub's classic-PAT UI; this is a same-rotation
+observation about that one PAT creation, not a claim that GitHub universally
+requires `repo` for classic package-scope tokens, and it is not an
+intentional expansion of OmniVise's Jenkins permission boundary. Do not
+describe this credential as minimally scoped in future documentation or
+reviews; if a future rotation is able to create an equivalent token without
+`repo`, it should adopt that, but no rotation is required solely to remove
+`repo` today.
 
 The PAT itself is created by the maintainer against their own `AldrionDev`
 GitHub account. Once created, it is stored and onboarded outside Git through
@@ -160,21 +194,48 @@ the external `local-jenkins-platform` secret/JCasC mechanism (section 5),
 exactly like the existing `k3s-omnivise-iot` and `hcp-terraform-cli`
 credentials already bound in the `Jenkinsfile`.
 
-This credential is provisioned and consumed by issue #118, but only for
-non-publishing GHCR authentication verification (section 7.3/7.4). Issue #118
-must not publish any application image. Issue #121 owns the actual
-publication path:
+This credential was provisioned and consumed by issue #118, initially only
+for non-publishing GHCR authentication verification (section 7.3/7.4). Issue
+#121 exercises the actual publication path with it:
 
 - exact-SHA package existence/probe operations against GHCR;
 - exact-SHA image push;
 - post-push digest verification.
 
-### 4.1 Separation of trust domains
+### 4.2 Pull credential: `ghcr-omnivise-iot-pull`
 
-The AWS credential (`aws-omnivise-iot-bootstrap`) and the GHCR credential
-(`ghcr-omnivise-iot-publisher`) are separate Jenkins credentials bound
-independently. Neither grants any access to the other's system. A compromise or
-rotation of one has no effect on the other's validity.
+| Property | Value |
+| --- | --- |
+| Jenkins credential ID | `ghcr-omnivise-iot-pull` |
+| GitHub/GHCR identity | `AldrionDev` |
+| Credential type | GitHub Personal Access Token (classic) |
+| Required scope | `read:packages` |
+| Observed scopes (current token) | `read:packages` |
+| Expiration | No expiration set |
+| Explicitly not required | `write:packages`; `delete:packages`; `repo` |
+
+This credential is minimally scoped at `read:packages`. It authenticates a
+read-only GHCR identity and must never be granted `write:packages` — that
+capability belongs exclusively to `ghcr-omnivise-iot-publisher` (section
+4.3).
+
+The pull credential is bound in the `Jenkinsfile`'s `infra/aws` plan stage as
+`TF_VAR_ghcr_username` / `TF_VAR_ghcr_token`, feeding the `ghcr-pull`
+Kubernetes image-pull Secret that `infra/aws/registry.tf` manages. Because
+Terraform manages that Secret, the rendered credential material is persisted
+in HCP Terraform state; this is an existing, already-documented design
+exception (`docs/aws-eks-application.md`, "Private GHCR Image Pulls") and is
+unchanged by issue #137.
+
+### 4.3 Separation of trust domains
+
+The AWS credential (`aws-omnivise-iot-bootstrap`), the GHCR publisher
+credential (`ghcr-omnivise-iot-publisher`) and the GHCR pull credential
+(`ghcr-omnivise-iot-pull`) are separate Jenkins credentials bound
+independently. None grants any access to another's system, and the
+write-capable publisher credential is never used for the Terraform-managed
+pull path (section 4.2) or vice versa. A compromise or rotation of one has no
+effect on the others' validity.
 
 ## 5. Secret provisioning contract
 
@@ -198,13 +259,16 @@ infrastructure, not a secret, and is provisioned directly by the
 maintainer/operator (section 2). Only the resulting long-lived access key is a
 secret that flows through the chain above.
 
-Rules that apply to both the AWS and GHCR credentials:
+Rules that apply to the AWS credential and both GHCR credentials:
 
-- Neither credential's secret material is ever committed to Git.
+- None of these credentials' secret material is ever committed to Git.
 - The AWS access key is never generated by Terraform and never written into HCP
   Terraform state — it is created directly against the
-  `omnivise-iot-jenkins-bootstrap` IAM user outside Terraform.
-- Neither credential is printed in logs, console output, or archived artifacts.
+  `omnivise-iot-jenkins-bootstrap` IAM user outside Terraform. (The GHCR pull
+  credential's own, separate, already-documented flow into HCP Terraform
+  state is covered in section 4.2 and is not affected by this rule.)
+- None of these credentials is printed in logs, console output, or archived
+  artifacts.
 - Credential-bearing shell blocks disable shell tracing (`set +x`), matching the
   existing convention at every `withCredentials` shell step in the `Jenkinsfile`.
 - Each credential is bound with the smallest necessary pipeline scope and
@@ -215,10 +279,12 @@ Rules that apply to both the AWS and GHCR credentials:
 | Credential ID | Type | Purpose |
 | --- | --- | --- |
 | `aws-omnivise-iot-bootstrap` | Jenkins username/password (username = AWS Access Key ID, password = AWS Secret Access Key) | Bootstrap authentication for `omnivise-iot-jenkins-bootstrap`, used only to call `sts:AssumeRole` |
-| `ghcr-omnivise-iot-publisher` | Jenkins username/password (username = `AldrionDev`, password = GitHub PAT classic) | GHCR authentication for `AldrionDev`, `write:packages` |
+| `ghcr-omnivise-iot-publisher` | Jenkins username/password (username = `AldrionDev`, password = GitHub PAT classic) | GHCR write authentication for `AldrionDev`; observed scopes `repo`, `write:packages` (section 4.1) |
+| `ghcr-omnivise-iot-pull` | Jenkins username/password (username = `AldrionDev`, password = GitHub PAT classic) | GHCR read-only authentication for `AldrionDev`, `read:packages` only (section 4.2) |
 
-Both IDs are stable, human-readable, and namespaced to this project, consistent
-with the existing `hcp-terraform-cli` and `k3s-omnivise-iot` naming convention.
+All three IDs are stable, human-readable, and namespaced to this project,
+consistent with the existing `hcp-terraform-cli` and `k3s-omnivise-iot` naming
+convention.
 
 ### 5.2 Ownership of each provisioning step
 
@@ -229,16 +295,40 @@ with the existing `hcp-terraform-cli` and `k3s-omnivise-iot` naming convention.
 | EKS access entry and namespace-scoped `AmazonEKSAdminPolicy` association | OmniVise maintainer/operator |
 | AWS access key creation for `omnivise-iot-jenkins-bootstrap` | OmniVise maintainer/operator — never Terraform-managed, never committed to Git, never written into HCP Terraform state |
 | External secret storage and Jenkins JCasC onboarding of `aws-omnivise-iot-bootstrap` | `local-jenkins-platform` |
-| GitHub PAT (classic) creation for `AldrionDev` | OmniVise maintainer, using their own GitHub account |
+| GitHub PAT (classic) creation for `AldrionDev` (publisher, pull) | OmniVise maintainer, using their own GitHub account |
 | External secret storage and Jenkins JCasC onboarding of `ghcr-omnivise-iot-publisher` | `local-jenkins-platform` |
+| External secret storage and Jenkins JCasC onboarding of `ghcr-omnivise-iot-pull` | `local-jenkins-platform` |
 
 `local-jenkins-platform` owns only the external secret storage and Jenkins
-credential (JCasC) onboarding step for both credentials — it does not create,
-own, or manage the AWS IAM user, IAM role, EKS access entry, or the GitHub PAT
-itself. Those are created directly by the OmniVise maintainer/operator against
-AWS and GitHub respectively, before the resulting secret material is handed to
-`local-jenkins-platform` for onboarding. This repository documents the
-contract; it does not perform any of these provisioning steps.
+credential (JCasC) onboarding step for both GHCR credentials — it does not
+create, own, or manage the AWS IAM user, IAM role, EKS access entry, or
+either GitHub PAT itself. Those are created directly by the OmniVise
+maintainer/operator against AWS and GitHub respectively, before the resulting
+secret material is handed to `local-jenkins-platform` for onboarding. This
+repository documents the contract; it does not perform any of these
+provisioning steps.
+
+### 5.3 HCP Terraform credential (shared, cross-repository)
+
+The `infra/aws` Terraform plan/apply steps in the `Jenkinsfile` also bind
+`hcp-terraform-cli` (a Jenkins Secret Text credential) for
+`TF_TOKEN_app_terraform_io`. Unlike the AWS and GHCR credentials above,
+`hcp-terraform-cli` is not OmniVise-specific:
+
+- it is owned, provisioned, and rotated entirely by `local-jenkins-platform`,
+  as a single global-scope credential on the shared Jenkins controller — this
+  repository consumes it but does not own or rotate it;
+- known consumers of this same credential id include OmniVise IoT,
+  HomeStreamLab, and HomeOps — rotating it is a platform-wide operation, not
+  an OmniVise-scoped one;
+- the token is deliberately long-lived but finite (current operational
+  baseline: an expiration horizon of approximately two years); see
+  `local-jenkins-platform`'s README, "HCP Terraform authentication" section,
+  for the authoritative expiration/renewal baseline and rotation procedure.
+
+This document does not restate that rotation procedure; it only records that
+OmniVise IoT is a consumer and that the credential's lifecycle is owned
+elsewhere.
 
 ## 6. Rotation and recovery
 
@@ -262,20 +352,48 @@ The previous working key must never be deleted before the replacement has been
 verified end to end. Disabling before deleting gives a safe rollback point if
 the new key turns out to be misconfigured.
 
-### 6.2 GHCR PAT rotation
+### 6.2 GHCR publisher PAT rotation (`ghcr-omnivise-iot-publisher`)
+
+1. Create a replacement GitHub PAT (classic) for `AldrionDev` intending
+   exactly `write:packages`. If `repo` appears alongside it, as observed
+   during the issue #137 rotation (section 4.1), that is not treated as a
+   rotation defect and does not block completing rotation.
+2. Replace the external Jenkins secret backing `ghcr-omnivise-iot-publisher`.
+3. Recreate or reload Jenkins so the new secret is mounted and the credential
+   is re-created from it.
+4. Verify GHCR authentication/probe capability (e.g. an authenticated manifest
+   HEAD request or `docker login`/`docker logout` against `ghcr.io`) without
+   publishing an application image.
+5. Only after that verification succeeds, revoke the previous PAT.
+
+### 6.3 GHCR pull PAT rotation (`ghcr-omnivise-iot-pull`)
 
 1. Create a replacement GitHub PAT (classic) for `AldrionDev` with exactly
-   `write:packages`.
-2. Replace the external Jenkins secret backing `ghcr-omnivise-iot-publisher`.
-3. Verify GHCR authentication/probe capability (e.g. an authenticated manifest
-   HEAD request against an existing tag) without publishing an application
-   image.
-4. Revoke the previous PAT only after that verification succeeds.
+   `read:packages` — no `write:packages`, `delete:packages`, or `repo`.
+2. Replace the external Jenkins secret backing `ghcr-omnivise-iot-pull`.
+3. Recreate or reload Jenkins so the new secret is mounted and the credential
+   is re-created from it.
+4. Verify GHCR authentication (e.g. `docker login`/`docker logout` against
+   `ghcr.io`) without pulling or publishing an application image, and without
+   running a Terraform plan/apply against `infra/aws` as part of this
+   verification.
+5. Only after that verification succeeds, revoke the previous PAT.
 
-### 6.3 Recovery behavior for invalid/revoked credentials
+### 6.4 HCP Terraform credential rotation (cross-reference)
 
-If either credential is invalid, expired, or revoked, the pipeline must fail
-closed:
+`hcp-terraform-cli` is rotated by `local-jenkins-platform`, not by this
+repository (section 5.3). This repository's role in that rotation is limited
+to independently verifying, after the platform rotates the token, that
+`infra/aws` Terraform operations still authenticate successfully — it never
+creates, updates, or revokes the token itself. See
+`local-jenkins-platform`'s README, "Token rotation", for the authoritative
+procedure, and note that rotation affects every Jenkins consumer of that
+credential id, not only OmniVise IoT.
+
+### 6.5 Recovery behavior for invalid/revoked credentials
+
+If any of the AWS, GHCR, or HCP Terraform credentials described above is
+invalid, expired, or revoked, the pipeline must fail closed:
 
 - Delivery must not fall back to an operator/admin identity (`cli-access-gtoth`,
   `AdminAssumeRole`) or to any broader credential.
@@ -340,10 +458,11 @@ and metadata.
 
 ### 7.2 Jenkins credential binding
 
-- Confirm the credential IDs `aws-omnivise-iot-bootstrap` and
-  `ghcr-omnivise-iot-publisher` exist in the Jenkins credential store after
-  external provisioning (Jenkins credentials UI or `jenkins-cli
-  list-credentials`, which lists IDs/types, not secret values).
+- Confirm the credential IDs `aws-omnivise-iot-bootstrap`,
+  `ghcr-omnivise-iot-publisher`, and `ghcr-omnivise-iot-pull` exist in the
+  Jenkins credential store after external provisioning (Jenkins credentials
+  UI or `jenkins-cli list-credentials`, which lists IDs/types, not secret
+  values).
 - Confirm each credential can be bound in a scratch/test pipeline step using
   `withCredentials`, and that the step's log output contains no secret value
   (shell tracing disabled, no `echo`/`printf` of the bound variable).
@@ -383,6 +502,11 @@ authenticated probe against it (`docker manifest inspect
 ghcr.io/aldriondev/<existing-image>:<existing-tag>`) may additionally be
 recorded as optional supplementary evidence, but it is not required for issue
 #118 completion.
+
+The same `docker login`/`docker logout` pattern, substituting the
+`ghcr-omnivise-iot-pull` credential and its own scratch `DOCKER_CONFIG`,
+verifies the pull credential's authentication without pulling any image
+(issue #137, section 7.5).
 
 ### 7.4 Verification evidence (issue #118, recorded)
 
@@ -436,6 +560,25 @@ This evidence satisfies the section 7 verification contract and issue #118's
 Definition of Done. It is reproducible by re-running the same read-only
 commands and the same Jenkins job against the current environment.
 
+### 7.5 Verification evidence (issue #137, recorded)
+
+Issue #137 rotated both GHCR credentials and the shared HCP Terraform
+credential and re-ran the same class of read-only checks as section 7.4
+against the rotated material: for each credential, the Jenkins container's
+bound secret was confirmed to match the new host secret, and an
+authenticated, non-mutating probe against the target system succeeded
+(`docker login`/`docker logout` against `ghcr.io` for each GHCR credential,
+publishing or pulling no image; the manual-only
+`platform/verify-delivery-capabilities` Jenkins job for `hcp-terraform-cli`,
+completing `Finished: SUCCESS` with its HCP Terraform authentication check
+passing). No secret material was printed. Each previous credential was
+revoked only after its replacement's verification succeeded (GHCR scopes:
+section 4.1, section 4.2; HCP Terraform token lifecycle: section 5.3).
+
+This evidence satisfies issue #137's Definition of Done for credential
+rotation and Jenkins-side verification. It supplements, and does not
+replace, the issue #118 evidence recorded in section 7.4.
+
 ## 8. Acceptance criteria cross-reference
 
 | Issue #118 acceptance criterion | Where addressed | Status |
@@ -471,3 +614,33 @@ Genuinely deferred to later issues (not part of #118):
 - implementing the Jenkins `aws` delivery-stage pipeline logic and publishing
   application images (issue #121);
 - ephemeral AWS demo bootstrap automation (issue #128).
+
+## 10. What was done to complete issue #137
+
+This documentation change (`docs/aws-delivery-identity.md` only) does not
+itself rotate any credential and does not run any command in section 7
+against a live account or the shared Jenkins platform. The credential
+rotation itself was manual/external work against GitHub (both PATs) and
+against HCP Terraform (the `local-jenkins-platform`-owned team token), not a
+repository change in this project.
+
+What this document newly records, that was not covered before issue #137:
+
+- the previously undocumented `ghcr-omnivise-iot-pull` credential — its
+  scope, ownership, rotation procedure, and its existing (unchanged) role in
+  the `infra/aws` Terraform/HCP state flow (section 4.2);
+- the corrected framing of `ghcr-omnivise-iot-publisher` as not minimally
+  scoped, with the `repo` scope attributed to what was observed in GitHub's
+  classic-PAT UI during this rotation, not a universal GitHub requirement or
+  an intentional permission expansion (section 4.1);
+- the `hcp-terraform-cli` credential's shared, cross-repository ownership and
+  lifecycle, cross-referenced to `local-jenkins-platform` rather than
+  duplicated (section 5.3, section 6.4);
+- Jenkins-side verification evidence for the rotated publisher, pull, and
+  HCP Terraform credentials (section 7.5).
+
+This document made no change to the AWS delivery identity (section 2), the
+AWS authentication constraints (section 3), any `infra/**` Terraform
+resource, or any Jenkins job definition. Issue #121's GHCR publication path
+and issue #128's ephemeral AWS demo bootstrap automation remain deferred, as
+recorded in section 9, and are unaffected by issue #137.
