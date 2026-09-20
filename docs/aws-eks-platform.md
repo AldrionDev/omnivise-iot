@@ -22,7 +22,9 @@ The initial platform consists of:
 - one managed node group using `t3.medium`;
 - node-group scaling of min `1`, desired `1`, max `2`;
 - dedicated Terraform-managed EKS cluster and node IAM roles;
-- an EKS access entry for the approved operator role.
+- an EKS access entry for the approved operator role;
+- a declarative, Terraform-managed IAM identity and namespace-scoped EKS
+  access entry for Jenkins AWS delivery (issue #139).
 
 Application workloads and application-specific Ingress resources are managed
 separately by `infra/aws/`.
@@ -175,6 +177,11 @@ At minimum verify:
 - cluster version is `1.36`;
 - the two expected public subnets are attached;
 - the operator access entry exists;
+- the `omnivise-iot-jenkins-bootstrap` IAM user and `omnivise-iot-jenkins-delivery`
+  IAM role exist, with only the declared inline policies (exclusive guards
+  report no out-of-band managed attachments);
+- the Jenkins delivery EKS access entry exists and is namespace-scoped to
+  `omnivise-iot` with `AmazonEKSAdminPolicy` — never cluster-scoped;
 - no unexpected unrestricted worker-node inbound security-group rule exists;
 - a subsequent Terraform plan reports no changes.
 
@@ -198,6 +205,43 @@ terraform apply tfplan
 
 Do not destroy shared or unrelated AWS resources. The platform Terraform state
 must contain only resources owned by this project.
+
+### Known Destroy-Ordering Constraints
+
+These constraints were observed during a previous teardown of this
+environment. They are operational sequencing requirements to follow, not a
+Terraform dependency-graph guarantee — nothing in this codebase's resource
+graph enforces them, so they must be followed by whoever runs the destroy.
+This section records them; it does not redesign the destroy graph.
+
+- **Application before platform.** `infra/aws` application resources must be
+  fully destroyed before `infra/aws-platform` is destroyed. Since issue #139,
+  this also applies to the Jenkins delivery identity: the platform destroy
+  removes the `omnivise-iot-jenkins-delivery` EKS access entry along with
+  everything else in `infra/aws-platform/delivery_identity.tf`, so Jenkins
+  loses the ability to reach the cluster at all once the platform is gone.
+- **No Jenkins AWS delivery in progress.** Do not begin a platform destroy
+  while a Jenkins `DEPLOY_TARGET=aws` (or `both`) run is in progress. A
+  platform destroy that lands mid-run can pull the delivery role's cluster
+  access out from under an in-flight `infra/aws` apply.
+- **Kubernetes/Helm-managed platform resources must be removed while the
+  operator EKS access entry still exists.** `helm_release.aws_load_balancer_controller`,
+  the `kubernetes_namespace_v1` and `kubernetes_storage_class_v1` resources,
+  and any other Kubernetes-API-managed platform resource are authorized
+  through the operator's cluster-admin access entry (`access.tf`), not
+  through a Terraform dependency edge. Deleting that access entry before
+  those resources are torn down breaks Kubernetes authorization mid-destroy
+  and is exactly what happened during a previous platform destroy recovery.
+  Let Terraform destroy Kubernetes/Helm-managed resources before, or without
+  separately touching, the operator access entry.
+- **Node group before network teardown.** The managed EKS node group must be
+  fully gone before Internet Gateway, subnet, or VPC teardown can complete —
+  live EC2 instances and their public addresses in a subnet can block IGW
+  detachment and subnet/VPC deletion.
+
+If a broader, systematic hardening of the platform destroy dependency graph
+is needed beyond recording these constraints, it should be tracked as its
+own follow-up issue rather than folded into a feature issue like #139.
 
 ## AWS Load Balancer Controller Capability
 
@@ -386,5 +430,118 @@ manage or attempt to recreate the same Namespace; exactly one root owns the
 
 The first fresh live proof of this ownership model — a Jenkins-first
 `DEPLOY_TARGET=aws` run against a freshly applied platform, without a prior
-`infra/aws` state — is deferred to issue #139, because on a fresh cluster the
-delivery access entry required for that run is only added by #139.
+`infra/aws` state — remains pending. Issue #139 is the issue that will
+perform it, below, because on a fresh cluster the delivery access entry
+required for that run is only added by #139's Terraform definition; that
+proof has not been executed yet.
+
+## Jenkins Delivery Identity Capability
+
+The platform's Terraform now declares the complete Jenkins AWS delivery
+identity (`delivery_identity.tf`), to be consumed by the separate `infra/aws`
+application root through the `Jenkinsfile`'s AWS delivery stages once the
+migration and apply below are executed:
+
+- IAM user `omnivise-iot-jenkins-bootstrap`, with exactly one inline policy
+  (`sts:AssumeRole` on the delivery role) and no access key, login profile, or
+  managed policy attachment;
+- IAM role `omnivise-iot-jenkins-delivery`, trusted only by the bootstrap
+  user, with exactly one inline policy (`eks:DescribeCluster` on this
+  cluster) and no managed policy attachment;
+- an EKS access entry for the delivery role, associated with
+  `AmazonEKSAdminPolicy` scoped to the `omnivise-iot` namespace only, never
+  cluster-scoped.
+
+This ownership is intentional and, once applied, ephemeral — mirroring the
+StorageClass and Namespace decisions above: the identity has a stable name
+and definition, and is designed so its AWS instance is created by the
+platform apply and destroyed by the platform destroy, exactly like every
+other platform-owned resource. Once the one-time migration procedure below
+is executed and the platform applied, no manual IAM mutation will be
+required to recreate it after a torn-down environment is rebuilt. Until that
+migration is executed, the live identity remains the one manually
+provisioned under issue #118 (`docs/aws-delivery-identity.md` section 5.2).
+Full identity/credential/rotation contract:
+[AWS Delivery Identity Contract](./aws-delivery-identity.md).
+
+The AWS access key used to authenticate as the bootstrap user is
+deliberately **not** part of this Terraform definition — see
+`docs/aws-delivery-identity.md` section 5.2 and issue #128 for the key's own
+lifecycle.
+
+### Migration Procedure (One-Time, Human-Executed, Pending)
+
+This procedure must be executed once, by the operator, to retire the
+identity that issue #118 provisioned manually and replace it with the
+Terraform-managed one above. **It has not been executed yet.** It is
+recorded here as the required live-verification step for issue #139, not as
+a repeatable operational step:
+
+1. Precondition: issue #138 merged; both `omnivise-iot-aws-app` and
+   `omnivise-iot-aws-platform` HCP Terraform workspaces empty; no Jenkins AWS
+   run in progress.
+2. Record the non-secret facts of the existing manual identity (policy
+   names, attached policies) for the Verification Record.
+3. As operator: delete the manual bootstrap user's access keys, inline
+   policy, and the user itself; delete the manual delivery role's inline
+   policy and the role itself. The cluster-bound manual EKS access entry is
+   already gone with the cluster.
+4. Verify `aws iam get-user --user-name omnivise-iot-jenkins-bootstrap` and
+   `aws iam get-role --role-name omnivise-iot-jenkins-delivery` both return
+   `NoSuchEntity`.
+5. Platform `terraform plan -out=tfplan` → review (IAM section explicitly)
+   → `terraform apply tfplan` → a second `terraform plan` reports no
+   changes.
+
+### Post-Apply Checks
+
+In addition to the general checks above:
+
+- an interim AWS access key is created manually for
+  `omnivise-iot-jenkins-bootstrap` (until issue #128's tooling exists), and
+  the full #118 identity chain still holds: bootstrap caller resolves to the
+  user ARN; bootstrap `eks:DescribeCluster` and `sts:AssumeRole` on
+  `AdminAssumeRole` are both denied; bootstrap can assume the delivery role;
+  delivery `eks:DescribeCluster` succeeds; delivery `eks:ListClusters` and
+  `iam:ListUsers` are both denied; `kubectl auth can-i create namespaces`
+  as the delivery role is `no`; `kubectl auth can-i create deployments -n
+  omnivise-iot` as the delivery role is `yes`;
+- a Jenkins-first `DEPLOY_TARGET=aws` run against the freshly applied
+  platform must succeed with no operator-run `infra/aws` apply — this is the
+  deferred #138 live proof; issue #139 is the issue that will close it, once
+  this check passes. It has not been performed yet.
+
+### Pending Live Teardown Verification
+
+**PENDING — not yet executed.** This is the required teardown sequence for
+issue #139's live verification. The Jenkinsfile does not provide an
+automated destroy stage for `infra/aws` — there is no Jenkins destroy job to
+invoke. Application teardown here is an operator-run action using the same
+Terraform saved-plan workflow this repository already uses for every
+destroy (see "Destroy" above), authenticated through the same delivery-role
+assumption chain the Jenkinsfile itself uses for applies
+(`aws-omnivise-iot-bootstrap` assumes `omnivise-iot-jenkins-delivery`), not
+a Jenkins-triggered action:
+
+1. Complete the AWS application teardown (`infra/aws`) —
+   `terraform plan -destroy -out=tfplan` → review → `terraform apply
+   tfplan`, the same saved-plan pattern the platform's own Destroy section
+   above uses — while the interim Jenkins bootstrap credential and the
+   platform-owned delivery identity are still valid.
+2. Verify the application root's teardown is complete: `terraform state
+   list` against the `omnivise-iot-aws-app` workspace reports no resources.
+   This is not DOWN-CLEAN — the platform is still up at this point, because
+   the delivery identity is still needed for step 1 and platform destroy
+   happens later, in step 4.
+3. Revoke/delete the interim bootstrap access key.
+4. Destroy `infra/aws-platform` (the platform's own Destroy section above).
+5. Verify the Terraform-managed `omnivise-iot-jenkins-bootstrap` IAM user
+   and `omnivise-iot-jenkins-delivery` IAM role both return `NoSuchEntity`.
+
+Application teardown must precede platform teardown (see "Known
+Destroy-Ordering Constraints" above). The interim access key is
+intentionally revoked in step 3, before the platform destroy in step 4 —
+that revocation is the normal credential-lifecycle path;
+`force_destroy = true` on the bootstrap IAM user (section 5.2 of
+[AWS Delivery Identity Contract](./aws-delivery-identity.md)) is only a
+teardown safety net for step 4, not a substitute for step 3.
