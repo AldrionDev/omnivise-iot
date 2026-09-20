@@ -1,6 +1,6 @@
 resource "kubernetes_namespace_v1" "application" {
   metadata {
-    name = local.namespace
+    name = local.application_namespace
 
     labels = {
       "app.kubernetes.io/name"       = local.application

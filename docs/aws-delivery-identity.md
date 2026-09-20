@@ -138,6 +138,19 @@ access entry — see `infra/aws-platform/access.tf` and `infra/aws-platform/iam.
 remain outside the application delivery identity and continue to be owned by
 the operator/bootstrap identity.
 
+The `omnivise-iot` Namespace itself is one of those cluster-scoped resources.
+Terraform ownership: `infra/aws-platform/` owns it (`namespace.tf`);
+`infra/aws/` does not own it and only references it by its known name — this
+is a Terraform-configuration fact, independent of any IAM identity. IAM
+authorization is a separate, narrower fact: the namespace-scoped delivery role
+described in this section is not authorized to create or delete the Namespace
+either way, because its EKS access entry only grants `AmazonEKSAdminPolicy`
+scoped to the `omnivise-iot` namespace, which governs namespaced objects
+inside that namespace, not the Namespace object itself. The delivery role is
+not a resource owner of anything in this architecture; ownership is a
+Terraform-root property, not an IAM-role property. See
+[AWS EKS Platform](./aws-eks-platform.md#application-namespace-capability).
+
 ## 3. Explicit AWS authentication constraints
 
 The OmniVise AWS delivery path must **not** introduce:

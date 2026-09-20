@@ -81,7 +81,6 @@ required EKS access entry and authorization can be used.
 
 The AWS application root manages:
 
-- `omnivise-iot` Kubernetes namespace (`namespace.tf`)
 - MongoDB StatefulSet, Service, and bootstrap Jobs through the shared
   `../modules/application` module
 - backend Deployment and Service
@@ -90,11 +89,16 @@ The AWS application root manages:
 - `ghcr-pull` GHCR image-pull Secret (`registry.tf`)
 - public ALB-backed Kubernetes Ingress for the frontend (`ingress.tf`)
 
-The `omnivise-iot-gp3` StorageClass used by the MongoDB PVC is cluster-scoped
-and is owned by `infra/aws-platform/` instead, since the Jenkins AWS delivery
-identity is intentionally namespace-scoped. This root only references the
-StorageClass by its known name (`local.mongodb_storage_class`); it does not
-manage the resource. See [AWS EKS Platform](./aws-eks-platform.md#ebs-csi-storage-capability).
+The `omnivise-iot` Namespace and the `omnivise-iot-gp3` StorageClass used by
+the MongoDB PVC are both cluster-scoped and are owned by `infra/aws-platform/`
+instead, since the Jenkins AWS delivery identity is intentionally
+namespace-scoped and cannot create or delete either resource. This root only
+references them by their known names (`local.namespace` and
+`local.mongodb_storage_class`); it does not manage either resource. The shared
+`../modules/application` module resolves the Namespace through a
+`data.kubernetes_namespace_v1` lookup. See
+[AWS EKS Platform](./aws-eks-platform.md#application-namespace-capability) and
+[AWS EKS Platform](./aws-eks-platform.md#ebs-csi-storage-capability).
 
 ## Exact-SHA Image Contract
 
@@ -401,7 +405,7 @@ Not implemented by this root:
 
 | Output                      | Description                                                |
 | --------------------------- | ---------------------------------------------------------- |
-| `namespace`                 | AWS application namespace managed by this root             |
+| `namespace`                 | Platform-owned omnivise-iot Namespace this root deploys into |
 | `mongodb_service_name`      | Cluster-internal MongoDB Service name                      |
 | `mongodb_port`              | TCP port MongoDB listens on                                |
 | `mongodb_replica_set_name`  | MongoDB replica-set name                                   |

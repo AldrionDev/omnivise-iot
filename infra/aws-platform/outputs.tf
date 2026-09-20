@@ -59,3 +59,8 @@ output "aws_load_balancer_controller_role_arn" {
   description = "IAM role used by the AWS Load Balancer Controller through EKS Pod Identity."
   value       = aws_iam_role.aws_load_balancer_controller.arn
 }
+
+output "application_namespace" {
+  description = "Name of the platform-owned omnivise-iot application Namespace. infra/aws references it by this known name; it does not manage the resource."
+  value       = kubernetes_namespace_v1.application.metadata[0].name
+}

@@ -26,8 +26,8 @@ run "application_contract" {
   }
 
   assert {
-    condition     = kubernetes_namespace_v1.application.metadata[0].name == "omnivise-iot"
-    error_message = "The AWS application root must own the omnivise-iot namespace."
+    condition     = local.namespace == "omnivise-iot"
+    error_message = "The AWS application root must reference the platform-owned Namespace by its known name."
   }
 
   assert {

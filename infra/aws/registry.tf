@@ -1,7 +1,7 @@
 resource "kubernetes_secret_v1" "ghcr_pull" {
   metadata {
     name      = "ghcr-pull"
-    namespace = kubernetes_namespace_v1.application.metadata[0].name
+    namespace = local.namespace
   }
 
   type = "kubernetes.io/dockerconfigjson"
