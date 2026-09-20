@@ -350,3 +350,41 @@ No changes. Your infrastructure matches the configuration.
 ```
 
 with detailed exit code `0`.
+
+## Application Namespace Capability
+
+The platform also owns the cluster-scoped `omnivise-iot` Namespace
+(`namespace.tf`) consumed by the application resources in `infra/aws/`. This
+ownership is intentional and mirrors the `omnivise-iot-gp3` StorageClass
+decision above: the Jenkins AWS delivery identity for `infra/aws/` is
+namespace-scoped via EKS access entry and cannot create or delete the
+cluster-scoped Namespace it needs to deploy into. On a freshly recreated
+cluster, a Jenkins-first `DEPLOY_TARGET=aws` run could not otherwise succeed.
+`infra/aws/` only references the Namespace by its known name
+(`local.namespace`); the shared `../modules/application` module resolves it
+through a `data.kubernetes_namespace_v1` lookup and never creates or manages
+it. See [AWS EKS Application](./aws-eks-application.md#application-resources-managed-by-infraaws).
+
+### Migration Precondition
+
+This ownership moved from `infra/aws/` to this platform root in issue #138.
+No `terraform state mv` or `import` was used, because the specific precondition
+for #138 was already satisfied: both the `omnivise-iot-aws-app` and
+`omnivise-iot-aws-platform` HCP Terraform workspaces held no resources
+(`terraform state list` was empty in both) at the time of the change, since the
+AWS demo environment had been fully torn down beforehand (DOWN-CLEAN). This
+DOWN-CLEAN precondition was specific to #138's circumstances, not a universal
+requirement for every future ownership transfer between these roots.
+
+If an equivalent ownership transfer is ever needed while live resources exist
+in either workspace, it requires either an explicit, reviewed Terraform state
+migration appropriate to the two separate HCP Terraform workspaces involved,
+or a controlled teardown before the code change is applied — never an
+unplanned cutover. In either case, the two roots must never simultaneously
+manage or attempt to recreate the same Namespace; exactly one root owns the
+`kubernetes_namespace_v1.application` resource at a time.
+
+The first fresh live proof of this ownership model — a Jenkins-first
+`DEPLOY_TARGET=aws` run against a freshly applied platform, without a prior
+`infra/aws` state — is deferred to issue #139, because on a fresh cluster the
+delivery access entry required for that run is only added by #139.

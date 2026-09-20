@@ -3,7 +3,7 @@ resource "kubernetes_ingress_v1" "frontend" {
 
   metadata {
     name      = "frontend"
-    namespace = kubernetes_namespace_v1.application.metadata[0].name
+    namespace = local.namespace
 
     annotations = {
       "alb.ingress.kubernetes.io/scheme"           = "internet-facing"

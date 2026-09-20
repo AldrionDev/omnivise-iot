@@ -1,5 +1,5 @@
 output "namespace" {
-  description = "AWS application namespace managed by this Terraform root."
+  description = "Platform-owned omnivise-iot Namespace this Terraform root deploys application resources into."
   value       = module.application.namespace
 }
 
