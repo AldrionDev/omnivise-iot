@@ -428,19 +428,19 @@ unplanned cutover. In either case, the two roots must never simultaneously
 manage or attempt to recreate the same Namespace; exactly one root owns the
 `kubernetes_namespace_v1.application` resource at a time.
 
-The first fresh live proof of this ownership model — a Jenkins-first
-`DEPLOY_TARGET=aws` run against a freshly applied platform, without a prior
-`infra/aws` state — remains pending. Issue #139 is the issue that will
-perform it, below, because on a fresh cluster the delivery access entry
-required for that run is only added by #139's Terraform definition; that
-proof has not been executed yet.
+The first fresh live proof of this ownership model was completed under
+issue #139 on 2026-09-20: Jenkins ran `DEPLOY_TARGET=aws` against a freshly
+applied platform with no prior `infra/aws` state and with no operator-run
+application apply. The saved application plan contained 12 additions, the
+exact saved plan applied successfully, and post-deploy HTTP smoke checks
+returned 200 for both the frontend and backend API. This completed the
+deferred issue #138 live proof.
 
 ## Jenkins Delivery Identity Capability
 
-The platform's Terraform now declares the complete Jenkins AWS delivery
-identity (`delivery_identity.tf`), to be consumed by the separate `infra/aws`
-application root through the `Jenkinsfile`'s AWS delivery stages once the
-migration and apply below are executed:
+The platform's Terraform declares the complete Jenkins AWS delivery
+identity (`delivery_identity.tf`), consumed by the separate `infra/aws`
+application root through the `Jenkinsfile`'s AWS delivery stages:
 
 - IAM user `omnivise-iot-jenkins-bootstrap`, with exactly one inline policy
   (`sts:AssumeRole` on the delivery role) and no access key, login profile, or
@@ -452,16 +452,17 @@ migration and apply below are executed:
   `AmazonEKSAdminPolicy` scoped to the `omnivise-iot` namespace only, never
   cluster-scoped.
 
-This ownership is intentional and, once applied, ephemeral — mirroring the
-StorageClass and Namespace decisions above: the identity has a stable name
-and definition, and is designed so its AWS instance is created by the
-platform apply and destroyed by the platform destroy, exactly like every
-other platform-owned resource. Once the one-time migration procedure below
-is executed and the platform applied, no manual IAM mutation will be
-required to recreate it after a torn-down environment is rebuilt. Until that
-migration is executed, the live identity remains the one manually
-provisioned under issue #118 (`docs/aws-delivery-identity.md` section 5.2).
-Full identity/credential/rotation contract:
+This ownership is intentional and ephemeral — mirroring the StorageClass
+and Namespace decisions above: the identity has a stable name and definition,
+while its AWS instance is created by the platform apply and destroyed by the
+platform destroy, exactly like every other platform-owned resource. The
+one-time migration from the manually provisioned issue #118 identity was
+completed under issue #139 on 2026-09-20. No manual IAM mutation is required
+to recreate the identity after a torn-down environment is rebuilt. At the
+end of the recorded verification the environment was torn down again, so no
+live bootstrap user or delivery role remains; the next platform apply will
+recreate them from this Terraform definition. Full
+identity/credential/rotation contract:
 [AWS Delivery Identity Contract](./aws-delivery-identity.md).
 
 The AWS access key used to authenticate as the bootstrap user is
@@ -469,13 +470,12 @@ deliberately **not** part of this Terraform definition — see
 `docs/aws-delivery-identity.md` section 5.2 and issue #128 for the key's own
 lifecycle.
 
-### Migration Procedure (One-Time, Human-Executed, Pending)
+### Migration Procedure (One-Time, Human-Executed, Completed)
 
-This procedure must be executed once, by the operator, to retire the
+This procedure was executed once by the operator on 2026-09-20 to retire the
 identity that issue #118 provisioned manually and replace it with the
-Terraform-managed one above. **It has not been executed yet.** It is
-recorded here as the required live-verification step for issue #139, not as
-a repeatable operational step:
+Terraform-managed one above. It is recorded here as historical verification
+for issue #139, not as a repeatable operational step:
 
 1. Precondition: issue #138 merged; both `omnivise-iot-aws-app` and
    `omnivise-iot-aws-platform` HCP Terraform workspaces empty; no Jenkins AWS
@@ -490,8 +490,9 @@ a repeatable operational step:
    `aws iam get-role --role-name omnivise-iot-jenkins-delivery` both return
    `NoSuchEntity`.
 5. Platform `terraform plan -out=tfplan` → review (IAM section explicitly)
-   → `terraform apply tfplan` → a second `terraform plan` reports no
-   changes.
+   → `terraform apply tfplan`; see the Live Verification Record below for
+   the Kubernetes/Helm authentication-context recovery this required → a
+   subsequent `terraform plan` reports no changes.
 
 ### Post-Apply Checks
 
@@ -507,21 +508,19 @@ In addition to the general checks above:
   as the delivery role is `no`; `kubectl auth can-i create deployments -n
   omnivise-iot` as the delivery role is `yes`;
 - a Jenkins-first `DEPLOY_TARGET=aws` run against the freshly applied
-  platform must succeed with no operator-run `infra/aws` apply — this is the
-  deferred #138 live proof; issue #139 is the issue that will close it, once
-  this check passes. It has not been performed yet.
+  platform succeeded with no operator-run `infra/aws` apply, completing the
+  deferred #138 live proof.
 
-### Pending Live Teardown Verification
+### Live Teardown Verification
 
-**PENDING — not yet executed.** This is the required teardown sequence for
-issue #139's live verification. The Jenkinsfile does not provide an
-automated destroy stage for `infra/aws` — there is no Jenkins destroy job to
-invoke. Application teardown here is an operator-run action using the same
-Terraform saved-plan workflow this repository already uses for every
-destroy (see "Destroy" above), authenticated through the same delivery-role
-assumption chain the Jenkinsfile itself uses for applies
-(`aws-omnivise-iot-bootstrap` assumes `omnivise-iot-jenkins-delivery`), not
-a Jenkins-triggered action:
+The required teardown sequence for issue #139 was executed successfully on
+2026-09-20. The Jenkinsfile does not provide an automated destroy stage for
+`infra/aws` — there is no Jenkins destroy job to invoke. Application teardown
+was therefore an operator-run action using the same Terraform saved-plan
+workflow this repository already uses for every destroy (see "Destroy"
+above), authenticated through the same delivery-role assumption chain the
+Jenkinsfile itself uses for applies (`aws-omnivise-iot-bootstrap` assumes
+`omnivise-iot-jenkins-delivery`), not a Jenkins-triggered action:
 
 1. Complete the AWS application teardown (`infra/aws`) —
    `terraform plan -destroy -out=tfplan` → review → `terraform apply
@@ -545,3 +544,54 @@ that revocation is the normal credential-lifecycle path;
 `force_destroy = true` on the bootstrap IAM user (section 5.2 of
 [AWS Delivery Identity Contract](./aws-delivery-identity.md)) is only a
 teardown safety net for step 4, not a substitute for step 3.
+
+### Issue #139 Live Verification Record (2026-09-20)
+
+The complete create/use/destroy lifecycle was verified against the live AWS
+account:
+
+- the pre-existing manually provisioned issue #118 bootstrap user and
+  delivery role were inspected, their permission boundaries recorded, then
+  their access key, inline policies, user, and role were removed; both
+  principals returned `NoSuchEntity` before Terraform recreation;
+- the first platform saved-plan apply created the AWS platform and
+  Terraform-managed delivery identity. Its Kubernetes/Helm resources failed
+  only because the local shell was still authenticated as
+  `cli-access-gtoth` rather than `AdminAssumeRole`; after explicitly assuming
+  `AdminAssumeRole`, a new reviewed recovery plan contained exactly three
+  additions, applied successfully, and a subsequent plan reported no
+  changes;
+- an interim bootstrap access key was created outside Terraform and loaded
+  into the existing `aws-omnivise-iot-bootstrap` Jenkins credential.
+  `platform/verify-delivery-capabilities` completed successfully;
+- the bootstrap principal had no direct EKS access and could not assume
+  `AdminAssumeRole`; it could assume only
+  `omnivise-iot-jenkins-delivery`. The delivery role could describe only the
+  target EKS cluster at the AWS API layer, while Kubernetes authorization
+  returned `no` for namespace creation and `yes` for deployment creation
+  inside `omnivise-iot`;
+- Jenkins then performed the first fresh-cluster `DEPLOY_TARGET=aws`
+  application delivery from exact Git SHA
+  `0f806d1c1f1aa6beccc0765bd1216f43717dceea`. The reviewed saved plan
+  contained 12 additions, the exact saved plan applied 12 additions, and
+  post-deploy frontend/backend smoke checks both returned HTTP 200;
+- application teardown used a reviewed `infra/aws` destroy plan. Ten
+  resources remained to destroy because the two TTL bootstrap Jobs had
+  already expired; the exact saved plan destroyed those ten resources and
+  the application Terraform state became empty;
+- the interim bootstrap access key was explicitly revoked before platform
+  teardown;
+- platform teardown followed the recorded ordering constraints: first the
+  Helm release, Namespace, and StorageClass; then the Pod Identity
+  association together with the Pod Identity Agent and EBS CSI addons; then
+  the managed node group; then the remaining platform resources. No EKS node
+  EC2 instances remained before network teardown;
+- the final platform destroy removed 32 remaining resources. The platform
+  Terraform state became empty, and both
+  `omnivise-iot-jenkins-bootstrap` and
+  `omnivise-iot-jenkins-delivery` returned `NoSuchEntity`.
+
+The resulting state is DOWN-CLEAN for the AWS demo environment. The stable
+Terraform definition remains in the repository; a future platform apply can
+recreate the delivery identity without reconstructing the former manual IAM
+setup.

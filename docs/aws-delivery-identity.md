@@ -2,8 +2,8 @@
 
 **Status:** Accepted, provisioned, and verified (issue #118); GHCR and shared
 HCP Terraform delivery credentials rotated and documented (issue #137); AWS
-IAM identity codified in Terraform (issue #139, implemented in the
-repository; one-time live migration and Jenkins-first verification pending)
+IAM identity codified in Terraform and live migration/Jenkins-first
+verification completed (issue #139)
 **Scope:** Jenkins AWS authentication/authorization and Jenkins/GHCR credential
 contract for the future AWS EKS application delivery path.
 **Relationship to other documents:** This document is the detailed reference for
@@ -34,20 +34,19 @@ No separate tracking issue exists for the provisioning step described above;
 it was tracked and completed as part of issue #118 itself, not as independent
 work.
 
-**Being superseded by issue #139 (repository change complete, live migration
-pending):** the AWS IAM user, role, policies/trust, and EKS access entry
-described above were manually provisioned when issue #118 completed. Issue
-#139 added a declarative Terraform definition for that same identity
-boundary (`infra/aws-platform/delivery_identity.tf`). Once the one-time
-migration procedure described in section 11 is executed and the platform is
-applied, the identity will have a stable name and definition with an
-ephemeral AWS instance, created and destroyed by the platform saved-plan
-workflow together with the rest of `infra/aws-platform/`. Until that
-migration is executed, the live AWS identity remains the one manually
-provisioned under issue #118. Only the AWS access key remains outside
-Terraform, unchanged, deferred to issue #128. Current repository ownership
-is recorded in section 5.2; what issue #139 changed and what remains pending
-for live verification are recorded in section 11.
+**Superseded by issue #139:** the AWS IAM user, role, policies/trust, and EKS
+access entry described above were manually provisioned when issue #118
+completed. Issue #139 added a declarative Terraform definition for that same
+identity boundary (`infra/aws-platform/delivery_identity.tf`) and completed
+the one-time migration and live verification on 2026-09-20. The identity now
+has a stable name and definition with an ephemeral AWS instance, created and
+destroyed by the platform saved-plan workflow together with the rest of
+`infra/aws-platform/`. At the end of the verification the platform was
+destroyed again, so no live bootstrap user or delivery role remains; the
+next platform apply will recreate them from Terraform. Only the AWS access
+key remains outside Terraform, unchanged, deferred to issue #128. Current
+repository ownership is recorded in section 5.2; issue #139's completed live
+verification is recorded in section 11.
 
 ### Issue #137 scope
 
@@ -320,8 +319,8 @@ convention.
 
 | Step | Owner |
 | --- | --- |
-| `omnivise-iot-jenkins-bootstrap` IAM user, `omnivise-iot-jenkins-delivery` IAM role, their policies/trust, and the namespace-scoped EKS access entry | Declared in Terraform (`infra/aws-platform/delivery_identity.tf`, issue #139), to be instantiated and destroyed by the `infra/aws-platform` saved-plan workflow, applied by the OmniVise maintainer/operator. Stable name and definition; once the pending one-time migration (section 11) is executed, the AWS instance becomes ephemeral — it will not survive a platform destroy and will require no manual recreation. Until that migration runs, the live identity is still the one manually provisioned under issue #118. |
-| AWS access key creation for `omnivise-iot-jenkins-bootstrap` | OmniVise maintainer/operator — never Terraform-managed, never committed to Git, never written into HCP Terraform state. The intended live sequence revokes the interim key before platform destroy (see `docs/aws-eks-platform.md`, "Jenkins Delivery Identity Capability", "Pending Live Teardown Verification"); `force_destroy = true` on the IAM user is a teardown safety net, not the normal credential-lifecycle path, in case a key is still present at destroy time. Key lifecycle tooling is deferred to issue #128. |
+| `omnivise-iot-jenkins-bootstrap` IAM user, `omnivise-iot-jenkins-delivery` IAM role, their policies/trust, and the namespace-scoped EKS access entry | Declared in Terraform (`infra/aws-platform/delivery_identity.tf`, issue #139), instantiated and destroyed by the `infra/aws-platform` saved-plan workflow, applied by the OmniVise maintainer/operator. Stable name and definition; the one-time migration was completed on 2026-09-20, so the AWS instance is ephemeral — it does not survive a platform destroy and requires no manual recreation. |
+| AWS access key creation for `omnivise-iot-jenkins-bootstrap` | OmniVise maintainer/operator — never Terraform-managed, never committed to Git, never written into HCP Terraform state. The verified live sequence revokes the interim key before platform destroy (see `docs/aws-eks-platform.md`, "Jenkins Delivery Identity Capability", "Live Teardown Verification"); `force_destroy = true` on the IAM user is a teardown safety net, not the normal credential-lifecycle path, in case a key is still present at destroy time. Key lifecycle tooling is deferred to issue #128. |
 | External secret storage and Jenkins JCasC onboarding of `aws-omnivise-iot-bootstrap` | `local-jenkins-platform` |
 | GitHub PAT (classic) creation for `AldrionDev` (publisher, pull) | OmniVise maintainer, using their own GitHub account |
 | External secret storage and Jenkins JCasC onboarding of `ghcr-omnivise-iot-publisher` | `local-jenkins-platform` |
@@ -366,10 +365,10 @@ elsewhere.
 
 Issue #139 added a Terraform definition for the identity itself
 (`omnivise-iot-jenkins-bootstrap`, `omnivise-iot-jenkins-delivery`, and their
-trust/policies/access entry). Once its one-time migration (section 11) is
-executed, the identity will be Terraform-managed and will require no manual
-recreation, leaving rotation as key-only. Issue #128's accepted design is a
-controlled issue/revoke credential lifecycle
+trust/policies/access entry). Its one-time migration (section 11) was
+completed on 2026-09-20, so the identity is Terraform-managed and requires no
+manual recreation, leaving rotation as key-only. Issue #128's accepted design
+is a controlled issue/revoke credential lifecycle
 (`scripts/aws-demo.sh` `issue-credential` / `revoke-credential`), not a
 second-key rotation workflow — #128 will **supersede** the manual procedure
 below with that issue/revoke lifecycle, not automate it. Until issue #128
@@ -687,7 +686,7 @@ resource, or any Jenkins job definition. Issue #121's GHCR publication path
 and issue #128's ephemeral AWS demo bootstrap automation remain deferred, as
 recorded in section 9, and are unaffected by issue #137.
 
-## 11. Issue #139: repository status and pending live verification
+## 11. Issue #139: completed live migration and verification
 
 Unlike issues #118 and #137, issue #139 is a repository/Terraform change, not
 a documentation-only one. It added `infra/aws-platform/delivery_identity.tf`,
@@ -697,37 +696,34 @@ policy guards, and the namespace-scoped `AmazonEKSAdminPolicy` EKS access
 entry — the same identity boundary manually provisioned under issue #118,
 now declaratively defined and covered by
 `infra/aws-platform/tests/delivery_identity.tftest.hcl`. This repository
-change is complete. **The live migration, apply, and Jenkins-first
-verification described below have not been executed yet.**
+change is complete. The live migration, apply, Jenkins-first verification,
+and teardown verification described below were completed on 2026-09-20.
 
 What the repository change did:
 
 - Gave the identity a **declarative Terraform definition** in
-  `infra/aws-platform/delivery_identity.tf`, alongside its existing,
-  still-live, manually provisioned AWS state. Its **name** and its
+  `infra/aws-platform/delivery_identity.tf`. Its **name** and its
   **permission boundary** (section 2) are unchanged in that definition:
   exactly `sts:AssumeRole` on the delivery role for the bootstrap user,
   exactly `eks:DescribeCluster` plus a namespace-scoped
   `AmazonEKSAdminPolicy` access entry for the delivery role.
-- Defines an **instance lifecycle** that, once applied, will change from
-  persistent/manual to ephemeral/declarative: the identity will be created
-  by the platform saved-plan apply and removed by the platform destroy, with
-  no manual IAM mutation required to recreate it after a torn-down
-  environment is rebuilt. This has not happened yet — it takes effect only
-  after the migration and platform apply below are executed.
+- Defines an **instance lifecycle** that is now
+  ephemeral/declarative: the identity is created by the platform saved-plan
+  apply and removed by the platform destroy, with no manual IAM mutation
+  required to recreate it after a torn-down environment is rebuilt.
 - Leaves the AWS access key unchanged: still created and destroyed manually,
   outside Terraform, never in HCP Terraform state (section 5, section 5.2).
-  The intended live sequence revokes the interim key before platform destroy
-  (`docs/aws-eks-platform.md`, "Pending Live Teardown Verification");
+  The verified live sequence revoked the interim key before platform destroy
+  (`docs/aws-eks-platform.md`, "Live Teardown Verification");
   `force_destroy = true` on the IAM user is declared as a teardown safety
   net, not the normal credential-lifecycle path, so a platform destroy still
   cannot leave an orphaned key behind if one is ever present at destroy
   time.
-- Documents (but does not itself execute) a one-time, human-executed
-  migration procedure that must retire the original manually provisioned
-  identity and replace it with the Terraform-managed one; this procedure is
-  recorded in `docs/aws-eks-platform.md`'s "Jenkins Delivery Identity
-  Capability" section, not duplicated here.
+- Documents the one-time, human-executed migration procedure that retired
+  the original manually provisioned identity and replaced it with the
+  Terraform-managed one; this procedure is recorded in
+  `docs/aws-eks-platform.md`'s "Jenkins Delivery Identity Capability"
+  section, not duplicated here.
 
 What did not change: the `Jenkinsfile`, JCasC, `local-jenkins-platform`, the
 `aws-omnivise-iot-bootstrap` Jenkins credential ID, the delivery role's AWS
@@ -735,24 +731,26 @@ permission boundary, and the namespace scope of its EKS access. No
 `aws_iam_access_key` or other secret-bearing Terraform resource was
 introduced.
 
-**Pending for issue #139 (not yet executed):**
+**Completed under issue #139 on 2026-09-20:**
 
-- the one-time migration procedure (`docs/aws-eks-platform.md`, "Jenkins
-  Delivery Identity Capability"): retiring the manually provisioned identity
-  and confirming `NoSuchEntity`;
-- the platform apply that instantiates the Terraform-managed identity, and
-  the follow-up plan confirming no changes;
-- re-verification of the full #118 identity chain against an interim access
-  key;
-- the fresh-cluster, Jenkins-first `DEPLOY_TARGET=aws` proof — this is the
-  deferred #138 live proof (section 9 of `docs/aws-eks-platform.md`); issue
-  #139 is the issue that will perform it, but has not yet;
-- the teardown-order live proof (application destroy while the interim key
-  is still valid, then key revocation, then platform destroy — see
-  `docs/aws-eks-platform.md`, "Jenkins Delivery Identity Capability").
+- the one-time migration procedure retired the manually provisioned identity
+  and confirmed both principals returned `NoSuchEntity`;
+- the platform apply instantiated the Terraform-managed identity; an
+  authentication-context recovery required a separate reviewed three-addition
+  recovery saved plan, after which the follow-up plan reported no changes;
+- the full #118 identity chain was re-verified against an interim access key;
+- the fresh-cluster, Jenkins-first `DEPLOY_TARGET=aws` proof completed the
+  deferred #138 live proof with no operator-run `infra/aws` apply;
+- the teardown-order live proof completed successfully: application destroy
+  while the interim key and delivery identity were still valid, interim-key
+  revocation, then ordered platform teardown;
+- the application and platform Terraform states were both empty afterward,
+  and the Terraform-managed bootstrap user and delivery role both returned
+  `NoSuchEntity`.
 
-This document will be updated to completed/past tense for the items above
-only after that live verification succeeds.
+The detailed live record is maintained in
+`docs/aws-eks-platform.md` under "Issue #139 Live Verification Record
+(2026-09-20)".
 
 Genuinely deferred to later issues (unaffected by #139):
 
