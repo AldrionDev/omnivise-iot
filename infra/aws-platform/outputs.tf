@@ -64,3 +64,13 @@ output "application_namespace" {
   description = "Name of the platform-owned omnivise-iot application Namespace. infra/aws references it by this known name; it does not manage the resource."
   value       = kubernetes_namespace_v1.application.metadata[0].name
 }
+
+output "jenkins_bootstrap_user_arn" {
+  description = "ARN of the Terraform-managed Jenkins AWS delivery bootstrap IAM user."
+  value       = aws_iam_user.jenkins_bootstrap.arn
+}
+
+output "jenkins_delivery_role_arn" {
+  description = "ARN of the Terraform-managed Jenkins AWS delivery IAM role."
+  value       = aws_iam_role.jenkins_delivery.arn
+}

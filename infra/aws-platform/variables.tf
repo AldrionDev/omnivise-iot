@@ -148,6 +148,14 @@ variable "operator_principal_arn" {
     condition     = can(regex("^arn:aws:iam::[0-9]{12}:role/.+$", var.operator_principal_arn))
     error_message = "operator_principal_arn must be an IAM role ARN."
   }
+
+  validation {
+    condition = !contains([
+      "arn:aws:iam::554422868760:role/omnivise-iot-jenkins-delivery",
+      "arn:aws:iam::554422868760:user/omnivise-iot-jenkins-bootstrap",
+    ], var.operator_principal_arn)
+    error_message = "operator_principal_arn must not be the Jenkins delivery role or bootstrap user; Jenkins never receives the cluster-admin operator access entry."
+  }
 }
 
 
