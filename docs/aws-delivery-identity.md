@@ -367,13 +367,19 @@ Issue #139 added a Terraform definition for the identity itself
 (`omnivise-iot-jenkins-bootstrap`, `omnivise-iot-jenkins-delivery`, and their
 trust/policies/access entry). Its one-time migration (section 11) was
 completed on 2026-09-20, so the identity is Terraform-managed and requires no
-manual recreation, leaving rotation as key-only. Issue #128's accepted design
-is a controlled issue/revoke credential lifecycle
-(`scripts/aws-demo.sh` `issue-credential` / `revoke-credential`), not a
-second-key rotation workflow — #128 will **supersede** the manual procedure
-below with that issue/revoke lifecycle, not automate it. Until issue #128
-lands, the two-key procedure below is the current, manual, legacy rotation
-procedure.
+manual recreation, leaving rotation as key-only.
+
+The current operator procedure is the issue #128 controlled issue/revoke
+credential lifecycle (`scripts/aws-demo.sh` `issue-credential` /
+`revoke-credential`), documented in the
+[AWS Demo Runbook](./aws-demo-runbook.md). It supersedes the two-key rotation
+below rather than automating it: a demo run issues exactly one bootstrap key
+and revokes it afterwards, and a second key is never created.
+
+The two-key procedure below is retained only as historical/legacy reference and
+is not used for the normal AWS demo lifecycle. Its safety rule still holds for
+any credential replacement: never remove a working credential before its
+replacement has been verified end to end.
 
 1. Create a second access key for the `omnivise-iot-jenkins-bootstrap` IAM user
    (AWS allows up to two active keys per user, enabling zero-downtime rotation).

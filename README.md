@@ -120,10 +120,10 @@ change.
 | Frontend | `npm ci`, `npm run lint`, `npm test`, `npm run build` (Node 22) |
 | Compose | `docker compose config` |
 
-### Jenkins — post-merge homelab delivery
+### Jenkins — post-merge delivery
 
-Jenkins owns delivery (`Jenkinsfile`). `DEPLOY_TARGET` currently offers only
-`homelab`.
+Jenkins owns delivery (`Jenkinsfile`). `DEPLOY_TARGET` offers `homelab`, `aws`
+and `both`; the combined `both` path is not covered by the AWS acceptance record.
 
 - **Immutable release identity** — the exact 40-character Git SHA, resolved once and
   frozen. Backend, frontend, and simulator images are tagged
@@ -153,25 +153,33 @@ Jenkins owns delivery (`Jenkinsfile`). `DEPLOY_TARGET` currently offers only
   state, Terraform or state failure, readiness timeout, image mismatch, or smoke
   failure all stop the pipeline. There is no automatic rollback.
 
-Jenkins GHCR publication capability implemented; live acceptance verification
-pending — Jenkins also publishes the same exact-SHA release set to GHCR
+Jenkins also publishes the same exact-SHA release set to GHCR
 (`ghcr.io/aldriondev/omnivise-iot-<component>:<git-sha>`), independently of the
 homelab registry — a symmetric artifact-source decision guarantees each image
 is still built at most once per run regardless of which registry needs it
 (whichever registry already has the exact-SHA artifact is pulled from and
-republished to the other, never rebuilt). GHCR publication is gated behind a
-temporary, narrowly-scoped `ENABLE_GHCR_VERIFICATION` pipeline parameter
-(default off) that never selects a Terraform root, never triggers an AWS
-apply, and never causes any Kubernetes mutation. The mechanism has not yet
-been exercised against a live Jenkins run or live GHCR state; see
+republished to the other, never rebuilt). GHCR publication is selected by
+`DEPLOY_TARGET` (`aws` / `both`). The Jenkins `main` AWS delivery in the
+issue #128 strict cold-start acceptance used the exact-SHA GHCR release set
+successfully in a live Jenkins run.
 [`docs/ghcr-release-set-verification.md`](docs/ghcr-release-set-verification.md)
-for exactly what is verified versus still pending.
+remains the historical, detailed record of what issue #121 specifically
+verified and what it left partially verified.
 
-The AWS EKS **platform foundation** is implemented in `infra/aws-platform/`.
-Application deployment, ingress, and Jenkins `aws` / `both` delivery (wiring
-GHCR publication to `DEPLOY_TARGET` and deploying to EKS) remain in progress.
-See [Current scope and future direction](#current-scope-and-future-direction)
-and [`docs/aws-eks-platform.md`](docs/aws-eks-platform.md).
+The AWS EKS **platform foundation** is implemented in `infra/aws-platform/`, and
+the application root in `infra/aws/`. Jenkins `DEPLOY_TARGET=aws` delivery from
+`main` (exact-SHA GHCR release set, saved-plan apply of `infra/aws`, post-deploy
+smoke) has been live-verified successfully in the issue #128 strict cold-start
+acceptance. The MongoDB PVC-retention fix from issue #128 has so far only been
+live-verified pre-merge, through an operator Terraform apply from the feature
+working tree; Jenkins delivery of the merged fix remains a post-merge
+validation item. See
+[Current scope and future direction](#current-scope-and-future-direction),
+[`docs/aws-eks-platform.md`](docs/aws-eks-platform.md) and the
+[acceptance record](docs/aws-demo-runbook.md#17-validation-record).
+The operator lifecycle from `DOWN-CLEAN` to a working AWS demo and back, including
+`scripts/aws-demo.sh`, is documented in
+[`docs/aws-demo-runbook.md`](docs/aws-demo-runbook.md).
 
 ## Homelab deployment
 
@@ -384,12 +392,14 @@ they are inert and safety rests on maintainer discipline. See
 - Multi-view React/TypeScript monitoring dashboard.
 - GitHub Actions pull-request CI.
 - Jenkins post-merge delivery to k3s homelab target (`DEPLOY_TARGET=homelab`).
-- Jenkins GHCR exact-SHA release-set publication capability implemented; live
-  acceptance verification pending (write-once / build-once / fail-closed,
-  post-push digest verification), independent of `DEPLOY_TARGET` and gated
-  behind a temporary `ENABLE_GHCR_VERIFICATION` verification parameter (issue
-  #121). See
+- Jenkins GHCR exact-SHA release-set publication (write-once / build-once /
+  fail-closed, post-push digest verification; issue #121), selected by
+  `DEPLOY_TARGET` (`aws` / `both`). See
   [`docs/ghcr-release-set-verification.md`](docs/ghcr-release-set-verification.md).
+- Jenkins post-merge delivery to AWS EKS (`DEPLOY_TARGET=aws`), live-verified
+  from `main` in the issue #128 strict cold-start acceptance. Jenkins delivery
+  of the merged MongoDB PVC-retention fix is still a post-merge validation item.
+  See [`docs/aws-demo-runbook.md`](docs/aws-demo-runbook.md#17-validation-record).
 
 **Future direction (not implemented)**
 
@@ -411,16 +421,16 @@ Data and persistence:
 Infrastructure:
 - AWS EKS platform foundation: `infra/aws-platform/` with dedicated HCP Terraform
   workspace/state and Local Execution.
-- AWS application deployment remains future work in `infra/aws/`, together with
-  `DEPLOY_TARGET=aws` / `both` and wiring GHCR publication (implemented by
-  issue #121, see above) to that target selection instead of the temporary
-  `ENABLE_GHCR_VERIFICATION` parameter, which issue #122 removes.
+- AWS application root: `infra/aws/`, applied by Jenkins `DEPLOY_TARGET=aws`
+  (live-verified from `main`, see above) or by the operator saved-plan path in
+  [`docs/aws-demo-runbook.md`](docs/aws-demo-runbook.md).
 - Declared non-goals for AWS work: no Amazon ECR, no GitHub-to-AWS OIDC.
 - The Jenkins AWS delivery identity and GHCR credential contract is defined,
   provisioned, and verified (least-privilege bootstrap-user-assumes-role,
-  namespace-scoped EKS access, no `AdministratorAccess`, no OIDC). AWS
-  application deployment remains future work. See
+  namespace-scoped EKS access, no `AdministratorAccess`, no OIDC). See
   [`docs/aws-delivery-identity.md`](docs/aws-delivery-identity.md).
 
-The AWS platform foundation now exists. The remaining items in this section are
-still future application and delivery capabilities.
+The AWS platform foundation (`infra/aws-platform/`) and application root
+(`infra/aws/`) exist, and Jenkins `DEPLOY_TARGET=aws` delivery exists and has
+been live-verified; these are not future work. Only the other entries listed
+under **Future direction (not implemented)** remain future capabilities.

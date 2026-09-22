@@ -191,6 +191,8 @@ mutation mechanism.
 ## Destroy
 
 Destroy is an explicit operator action and must be reviewed before execution.
+The end-to-end teardown order (credential revoke, application, platform,
+`DOWN-CLEAN` check) is in the [AWS Demo Runbook](./aws-demo-runbook.md).
 
 Before destroying the platform, first remove application-layer resources that
 depend on it.
@@ -208,11 +210,25 @@ must contain only resources owned by this project.
 
 ### Known Destroy-Ordering Constraints
 
-These constraints were observed during a previous teardown of this
-environment. They are operational sequencing requirements to follow, not a
-Terraform dependency-graph guarantee — nothing in this codebase's resource
-graph enforces them, so they must be followed by whoever runs the destroy.
-This section records them; it does not redesign the destroy graph.
+These constraints were observed during previous teardowns of this
+environment. The platform-internal ones are now encoded in the Terraform
+dependency graph, so a normal full `terraform plan -destroy` orders them
+correctly (and a cold create uses the same edges in the forward direction):
+
+| Resource | Explicit `depends_on` | Create effect | Destroy effect |
+| --- | --- | --- | --- |
+| `kubernetes_namespace_v1.application`, `kubernetes_storage_class_v1.gp3`, `helm_release.aws_load_balancer_controller` | `aws_eks_access_policy_association.operator_cluster_admin` | Kubernetes/Helm calls start only after operator cluster-admin access exists | operator access is removed only after these resources are gone |
+| `aws_eks_node_group.this` | `aws_route.public_internet`, `aws_route_table_association.public` | public-subnet nodes join only after the Internet route exists | the route, route-table associations and Internet Gateway are removed only after the nodes (and their public IPs) are gone |
+
+A normal full `terraform plan` / `apply` and `terraform plan -destroy` use
+these configuration edges. The issue #128 second strict cold-start acceptance
+proved them on a fresh platform lifecycle: one saved-plan apply created all 39
+platform resources and one saved-plan destroy removed them, without targeted
+destroy or state recovery (see the
+[AWS Demo Runbook validation record](./aws-demo-runbook.md#17-validation-record)).
+
+The application-before-platform and no-in-flight-Jenkins-run constraints
+below remain operational requirements across the two Terraform roots.
 
 - **Application before platform.** `infra/aws` application resources must be
   fully destroyed before `infra/aws-platform` is destroyed. Since issue #139,

@@ -152,6 +152,16 @@ variable "mongodb_storage_size" {
   }
 }
 
+variable "mongodb_pvc_retention_when_deleted" {
+  type        = string
+  description = "StatefulSet persistentVolumeClaimRetentionPolicy.whenDeleted for the MongoDB data volume claim: \"Retain\" keeps the PVC after the StatefulSet is deleted, \"Delete\" lets Kubernetes garbage-collect it. Supplied by the environment root, not assumed by the shared module."
+
+  validation {
+    condition     = contains(["Retain", "Delete"], var.mongodb_pvc_retention_when_deleted)
+    error_message = "mongodb_pvc_retention_when_deleted must be \"Retain\" or \"Delete\"."
+  }
+}
+
 variable "mongodb_cpu_request" {
   type        = string
   description = "CPU request for the MongoDB container. Part of the MongoDB container resource budget supplied by the environment root, not baked into the shared module."

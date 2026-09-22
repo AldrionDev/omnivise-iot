@@ -41,10 +41,15 @@ resource "aws_eks_node_group" "this" {
     max_unavailable = 1
   }
 
+  # Public-subnet nodes need the Internet route to join the cluster. On
+  # destroy this keeps the route, route-table associations and Internet
+  # Gateway until the nodes (and their public IPs) are gone.
   depends_on = [
     aws_iam_role_policy_attachment.eks_node_worker_policy,
     aws_iam_role_policy_attachment.eks_node_cni_policy,
     aws_iam_role_policy_attachment.eks_node_registry_policy,
+    aws_route.public_internet,
+    aws_route_table_association.public,
   ]
 
   tags = {
