@@ -70,6 +70,11 @@ run "application_contract" {
   }
 
   assert {
+    condition     = local.mongodb_pvc_retention_when_deleted == "Delete"
+    error_message = "The AWS MongoDB StatefulSet must delete its PVC when the StatefulSet is deleted, so application destroy leaves no EBS volume behind."
+  }
+
+  assert {
     condition     = module.application.namespace == "omnivise-iot"
     error_message = "The shared application module must target the AWS application namespace."
   }

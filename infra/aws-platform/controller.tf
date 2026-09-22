@@ -29,8 +29,11 @@ resource "helm_release" "aws_load_balancer_controller" {
     },
   ]
 
+  # The release is installed through the operator cluster-admin access entry;
+  # it must be uninstalled before that access is removed.
   depends_on = [
     aws_eks_node_group.this,
     aws_eks_pod_identity_association.aws_load_balancer_controller,
+    aws_eks_access_policy_association.operator_cluster_admin,
   ]
 }

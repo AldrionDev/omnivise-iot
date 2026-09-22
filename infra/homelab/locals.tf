@@ -8,6 +8,9 @@ locals {
   mongodb_storage_class    = "local-path"
   mongodb_storage_size     = "2Gi"
 
+  # Homelab data is persistent: the PVC outlives the StatefulSet (Kubernetes default).
+  mongodb_pvc_retention_when_deleted = "Retain"
+
   mongodb_cpu_request    = "250m"
   mongodb_cpu_limit      = "500m"
   mongodb_memory_request = "512Mi"

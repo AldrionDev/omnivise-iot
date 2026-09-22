@@ -7,6 +7,7 @@ variables {
   simulator_image_ref                  = "example.invalid/simulator:test"
   mongodb_application_bootstrap_script = "print('test')"
   mongodb_storage_size                 = "2Gi"
+  mongodb_pvc_retention_when_deleted   = "Retain"
   mongodb_cpu_request                  = "250m"
   mongodb_cpu_limit                    = "500m"
   mongodb_memory_request               = "512Mi"

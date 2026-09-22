@@ -16,4 +16,10 @@ resource "kubernetes_storage_class_v1" "gp3" {
   parameters = {
     type = "gp3"
   }
+
+  # Kubernetes API calls are authorized by the operator cluster-admin access
+  # entry. Create after it; destroy before it (reverse order).
+  depends_on = [
+    aws_eks_access_policy_association.operator_cluster_admin,
+  ]
 }

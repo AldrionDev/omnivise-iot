@@ -7,6 +7,10 @@ locals {
   mongodb_replica_set_name = "rs0"
   mongodb_storage_size     = "2Gi"
 
+  # The demo environment is disposable: deleting the StatefulSet also deletes
+  # its PVC so the EBS CSI driver reclaims the volume before platform teardown.
+  mongodb_pvc_retention_when_deleted = "Delete"
+
   mongodb_cpu_request    = "250m"
   mongodb_cpu_limit      = "500m"
   mongodb_memory_request = "512Mi"

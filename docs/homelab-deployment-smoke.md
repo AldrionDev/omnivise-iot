@@ -589,6 +589,8 @@ Verification category: MONGODB.
    `volume_claim_template` metadata name `data` plus the StatefulSet Pod
    `mongodb-0`; the storage class comes from `local.mongodb_storage_class` in
    `infra/homelab/locals.tf`. Confirm both against the repo at review time.
+   The homelab root sets `local.mongodb_pvc_retention_when_deleted = "Retain"`,
+   so the PVC outlives the StatefulSet.
 
 2. After the simulator has produced data, capture non-sensitive evidence that
    the `omnivise_iot.sensor_readings` collection holds sensor data (document

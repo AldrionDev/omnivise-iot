@@ -86,6 +86,13 @@ resource "kubernetes_stateful_set_v1" "mongodb" {
       match_labels = local.mongodb_selector_labels
     }
 
+    # whenDeleted is environment-specific; whenScaled stays at the Kubernetes
+    # default because replicas is fixed at 1.
+    persistent_volume_claim_retention_policy {
+      when_deleted = var.mongodb_pvc_retention_when_deleted
+      when_scaled  = "Retain"
+    }
+
     template {
       metadata {
         labels = local.mongodb_labels

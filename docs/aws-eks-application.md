@@ -100,6 +100,15 @@ references them by their known names (`local.namespace` and
 [AWS EKS Platform](./aws-eks-platform.md#application-namespace-capability) and
 [AWS EKS Platform](./aws-eks-platform.md#ebs-csi-storage-capability).
 
+The MongoDB PVC lifecycle is selected per environment through the shared
+module's required `mongodb_pvc_retention_when_deleted` input, rendered as the
+StatefulSet `persistentVolumeClaimRetentionPolicy.whenDeleted`
+(`whenScaled` stays `Retain`). The AWS root sets `Delete`
+(`local.mongodb_pvc_retention_when_deleted`): destroying the application lets
+Kubernetes garbage-collect `data-mongodb-0` and the EBS CSI driver reclaim its
+volume, so no data survives an application destroy. The homelab root sets
+`Retain` explicitly, preserving its persistent data.
+
 ## Exact-SHA Image Contract
 
 `infra/aws/variables.tf` requires each application image reference to be a full
@@ -288,7 +297,8 @@ Terraform root.
 ## Apply Workflow
 
 The AWS application root follows the saved-plan review boundary used across
-OmniVise delivery.
+OmniVise delivery. Its place in the full demo lifecycle, including teardown, is
+described in the [AWS Demo Runbook](./aws-demo-runbook.md).
 
 Example:
 

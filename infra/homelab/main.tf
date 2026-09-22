@@ -19,6 +19,7 @@ module "application" {
   mongodb_replica_set_name             = local.mongodb_replica_set_name
   mongodb_storage_class                = local.mongodb_storage_class
   mongodb_storage_size                 = local.mongodb_storage_size
+  mongodb_pvc_retention_when_deleted   = local.mongodb_pvc_retention_when_deleted
 
   mongodb_cpu_request    = local.mongodb_cpu_request
   mongodb_cpu_limit      = local.mongodb_cpu_limit
