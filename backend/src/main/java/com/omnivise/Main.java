@@ -2,6 +2,7 @@ package com.omnivise;
 
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
@@ -22,6 +23,17 @@ import com.omnivise.webhook.AlertWebhook;
 
 import io.github.cdimascio.dotenv.Dotenv;
 import io.javalin.Javalin;
+import io.javalin.micrometer.MicrometerPlugin;
+import io.micrometer.core.instrument.Meter;
+import io.micrometer.core.instrument.binder.jvm.JvmGcMetrics;
+import io.micrometer.core.instrument.binder.jvm.JvmMemoryMetrics;
+import io.micrometer.core.instrument.binder.jvm.JvmThreadMetrics;
+import io.micrometer.core.instrument.binder.system.FileDescriptorMetrics;
+import io.micrometer.core.instrument.binder.system.ProcessorMetrics;
+import io.micrometer.core.instrument.config.MeterFilter;
+import io.micrometer.core.instrument.distribution.DistributionStatisticConfig;
+import io.micrometer.prometheus.PrometheusConfig;
+import io.micrometer.prometheus.PrometheusMeterRegistry;
 
 public class Main {
 
@@ -35,6 +47,9 @@ public class Main {
     private static Dotenv dotenv;
 
     public static void main(String[] args) {
+
+        MetricsResources metricsResources = createMetricsResources();
+        PrometheusMeterRegistry prometheusRegistry = metricsResources.registry();
         // Load the .env file from the project root
         dotenv = loadDotenvFromProjectRoot();
 
@@ -93,9 +108,13 @@ public class Main {
                 alertEvaluator);
         changeStreamListener.start();
 
-        // Stop the Change Stream listener cleanly on application shutdown (SIGTERM / Ctrl-C).
+        // Stop the Change Stream listener cleanly on application shutdown (SIGTERM /
+        // Ctrl-C).
+
         Runtime.getRuntime().addShutdownHook(
                 new Thread(changeStreamListener::stop, "shutdown-changestream"));
+        Runtime.getRuntime().addShutdownHook(
+                new Thread(metricsResources::close, "shutdown-metrics"));
 
         // Test MongoDB connection by fetching 5 latest readings
         List<SensorReading> testLatestReadings = sensorService.getLatestReadings(null, null, 5);
@@ -109,6 +128,9 @@ public class Main {
 
         // Javalin app create and start
         Javalin app = Javalin.create(config -> {
+            config.registerPlugin(new MicrometerPlugin(pluginConfig -> {
+                pluginConfig.registry = prometheusRegistry;
+            }));
             config.showJavalinBanner = false;
             config.http.defaultContentType = "application/json";
 
@@ -136,6 +158,12 @@ public class Main {
 
         // Health check endpoint
         app.get("/health", ctx -> ctx.json(new Response("status", "healthy")));
+
+        // Prometheus metrics endpoint
+        app.get("/metrics", ctx -> {
+            ctx.header("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
+            ctx.result(prometheusRegistry.scrape());
+        });
 
         // Device registry (seeded, read-only)
         // GET /api/devices
@@ -185,7 +213,8 @@ public class Main {
         });
 
         // Alert events, newest first, optional state / severity / deviceId / limit.
-        // GET /api/alerts?state=firing|resolved&severity=warning|critical&deviceId=&limit=100
+        // GET
+        // /api/alerts?state=firing|resolved&severity=warning|critical&deviceId=&limit=100
         app.get("/api/alerts", ctx -> {
             AlertQuery.Result parsed = AlertQuery.parse(
                     ctx.queryParam("state"),
@@ -241,6 +270,7 @@ public class Main {
         System.out.println("\n📋 REST API endpoints:");
         System.out.println("   GET  /");
         System.out.println("   GET  /health");
+        System.out.println("   GET  /metrics");
         System.out.println("   GET  /api/devices");
         System.out.println("   GET  /api/devices/{deviceId}");
         System.out.println("   GET  /api/sensors/latest?deviceId=&channel=&limit=50");
@@ -250,7 +280,48 @@ public class Main {
         System.out.println("   GET  /api/alerts/rules?deviceId=");
     }
 
-    /** Keeps the {@code limit} query parameter within a sane, non-negative range. */
+    static MetricsResources createMetricsResources() {
+        PrometheusMeterRegistry registry = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+
+        registry.config().meterFilter(new MeterFilter() {
+            @Override
+            public DistributionStatisticConfig configure(
+                    Meter.Id id,
+                    DistributionStatisticConfig config) {
+
+                if (!id.getName().equals("jetty.server.requests")) {
+                    return config;
+                }
+
+                return DistributionStatisticConfig.builder()
+                        .serviceLevelObjectives(
+                                Duration.ofMillis(10).toNanos(),
+                                Duration.ofMillis(25).toNanos(),
+                                Duration.ofMillis(50).toNanos(),
+                                Duration.ofMillis(100).toNanos(),
+                                Duration.ofMillis(250).toNanos(),
+                                Duration.ofMillis(500).toNanos(),
+                                Duration.ofSeconds(1).toNanos())
+                        .build()
+                        .merge(config);
+            }
+        });
+
+        new JvmMemoryMetrics().bindTo(registry);
+
+        JvmGcMetrics jvmGcMetrics = new JvmGcMetrics();
+        jvmGcMetrics.bindTo(registry);
+
+        new JvmThreadMetrics().bindTo(registry);
+        new FileDescriptorMetrics().bindTo(registry);
+        new ProcessorMetrics().bindTo(registry);
+
+        return new MetricsResources(registry, jvmGcMetrics);
+    }
+
+    /**
+     * Keeps the {@code limit} query parameter within a sane, non-negative range.
+     */
     static int clampLimit(int requested) {
         if (requested < 1) {
             return 1;
@@ -386,5 +457,16 @@ public class Main {
     }
 
     record Response(String message, String version) {
+    }
+
+    record MetricsResources(
+            PrometheusMeterRegistry registry,
+            JvmGcMetrics jvmGcMetrics) implements AutoCloseable {
+
+        @Override
+        public void close() {
+            jvmGcMetrics.close();
+            registry.close();
+        }
     }
 }
