@@ -1,0 +1,1 @@
+[{"source": "__name__ matcher", "reason": "__name__ matcher is not allowed", "expr": "{__name__=~\"omnivise_.*\"}"}]

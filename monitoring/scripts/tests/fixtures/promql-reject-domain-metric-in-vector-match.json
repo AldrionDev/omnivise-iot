@@ -1,0 +1,1 @@
+[{"source": "domain metric on the right-hand side", "reason": "metric 'alert_threshold_value' is not on the allowlist", "expr": "up * on (job) group_left alert_threshold_value"}]

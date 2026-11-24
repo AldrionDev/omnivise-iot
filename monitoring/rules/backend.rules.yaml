@@ -1,0 +1,18 @@
+# Backend technical health (promtool format), built on the I1 metric contract in
+# docs/backend-metrics.md. Injected via scripts/render-content.sh.
+groups:
+  - name: omnivise-backend
+    rules:
+      # Zero traffic yields 0/0 = NaN, which never satisfies the comparison.
+      - alert: BackendHighErrorRatio
+        expr: |
+          sum(rate(jetty_server_requests_seconds_count{job="backend",status=~"5.."}[5m]))
+          /
+          sum(rate(jetty_server_requests_seconds_count{job="backend"}[5m]))
+          > 0.05
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: Backend 5xx ratio above 5%
+          description: "More than 5% of backend HTTP requests returned 5xx for 10 minutes."

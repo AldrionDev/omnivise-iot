@@ -1,0 +1,24 @@
+rule_files:
+  - ../backend.rules.yaml
+evaluation_interval: 30s
+tests:
+  - interval: 30s
+    input_series:
+      - series: 'omnivise_sensor_reading_value{deviceId="d-01"}'
+        values: '60x10'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: SensorValueHigh
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: Sensor value high
+              description: Domain alert that must never be in the platform rule set.
+  - interval: 30s
+    input_series:
+      - series: 'omnivise_sensor_reading_value{deviceId="d-01"}'
+        values: '10x10'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: SensorValueHigh
+        exp_alerts: []

@@ -12,7 +12,9 @@ name: CI
 
 on:
   pull_request:
-    branches: [main]
+    branches:
+      - main
+      - feat/observability-m1
   push:
     branches: [main]
 
@@ -113,3 +115,19 @@ jobs:
 
       - name: Validate docker-compose.yml
         run: docker compose config
+
+  monitoring-validate:
+    name: Monitoring contract validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # All validation logic lives in the repository scripts; this job only installs
+    # the pinned, checksum-verified toolchain and runs the contract.
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install pinned monitoring toolchain
+        run: monitoring/scripts/install-tools.sh
+
+      - name: Validate monitoring contract
+        run: monitoring/scripts/validate.sh

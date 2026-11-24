@@ -1,0 +1,275 @@
+# promtool unit tests for ../platform.rules.yaml.
+# Every alert has at least one firing and one explicit non-firing (exp_alerts: []) case.
+rule_files:
+  - ../platform.rules.yaml
+
+evaluation_interval: 30s
+
+tests:
+  # --- TargetDown -----------------------------------------------------------
+  - name: TargetDown fires for an expected job that stays down
+    interval: 30s
+    input_series:
+      - series: 'up{job="backend",instance="10.0.0.10:8080"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: TargetDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: backend
+              instance: "10.0.0.10:8080"
+            exp_annotations:
+              summary: Scrape target down
+              description: "Target 10.0.0.10:8080 of job backend has been down for 5 minutes."
+
+  - name: TargetDown does not fire for healthy, short or unexpected targets
+    interval: 30s
+    input_series:
+      - series: 'up{job="backend",instance="10.0.0.10:8080"}'
+        values: '1x20'
+      - series: 'up{job="kubelet",instance="10.0.0.1:10250"}'
+        values: '0x5 1x15'
+      - series: 'up{job="someone-elses-job",instance="10.0.0.99:9100"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: TargetDown
+        exp_alerts: []
+
+  # --- KubePodCrashLooping --------------------------------------------------
+  - name: KubePodCrashLooping fires in an OmniVise namespace
+    interval: 30s
+    input_series:
+      - series: 'kube_pod_container_status_waiting_reason{namespace="omnivise-iot",pod="backend-abc",container="backend",reason="CrashLoopBackOff"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: KubePodCrashLooping
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: omnivise-iot
+              pod: backend-abc
+              container: backend
+              reason: CrashLoopBackOff
+            exp_annotations:
+              summary: Container is crash looping
+              description: "Container backend in pod omnivise-iot/backend-abc has been in CrashLoopBackOff for 5 minutes."
+
+  - name: KubePodCrashLooping ignores other tenants' namespaces
+    interval: 30s
+    input_series:
+      - series: 'kube_pod_container_status_waiting_reason{namespace="other-team",pod="x-1",container="x",reason="CrashLoopBackOff"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: KubePodCrashLooping
+        exp_alerts: []
+
+  # --- ContainerOOMKilled ---------------------------------------------------
+  - name: ContainerOOMKilled fires right after an OOM-caused restart
+    interval: 30s
+    input_series:
+      - series: 'kube_pod_container_status_restarts_total{namespace="monitoring",pod="prom-0",container="prometheus"}'
+        values: '0 0 0 1 1 1 1 1 1 1'
+      - series: 'kube_pod_container_status_last_terminated_reason{namespace="monitoring",pod="prom-0",container="prometheus",reason="OOMKilled"}'
+        values: '0 0 0 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: ContainerOOMKilled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: monitoring
+              pod: prom-0
+              container: prometheus
+            exp_annotations:
+              summary: Container was OOMKilled
+              description: "Container prometheus in pod monitoring/prom-0 restarted after being OOMKilled."
+
+  - name: ContainerOOMKilled ignores non-OOM restarts
+    interval: 30s
+    input_series:
+      - series: 'kube_pod_container_status_restarts_total{namespace="monitoring",pod="prom-0",container="prometheus"}'
+        values: '0 0 0 1 1 1 1 1 1 1'
+      - series: 'kube_pod_container_status_last_terminated_reason{namespace="monitoring",pod="prom-0",container="prometheus",reason="Error"}'
+        values: '0 0 0 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: ContainerOOMKilled
+        exp_alerts: []
+
+  - name: ContainerOOMKilled stops once the OOM restart is older than 10 minutes
+    interval: 1m
+    input_series:
+      - series: 'kube_pod_container_status_restarts_total{namespace="monitoring",pod="prom-0",container="prometheus"}'
+        values: '0 1x30'
+      - series: 'kube_pod_container_status_last_terminated_reason{namespace="monitoring",pod="prom-0",container="prometheus",reason="OOMKilled"}'
+        values: '0 1x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: ContainerOOMKilled
+        exp_alerts: []
+
+  # --- KubeDeploymentReplicasMismatch ---------------------------------------
+  - name: KubeDeploymentReplicasMismatch fires after 10 minutes of mismatch
+    interval: 1m
+    input_series:
+      - series: 'kube_deployment_spec_replicas{namespace="omnivise-iot",deployment="backend"}'
+        values: '1x20'
+      - series: 'kube_deployment_status_replicas_available{namespace="omnivise-iot",deployment="backend"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: KubeDeploymentReplicasMismatch
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: omnivise-iot
+              deployment: backend
+            exp_annotations:
+              summary: Deployment replicas mismatch
+              description: "Deployment omnivise-iot/backend has not matched its desired replica count for 10 minutes."
+
+  - name: KubeDeploymentReplicasMismatch stays quiet when matched or foreign
+    interval: 1m
+    input_series:
+      - series: 'kube_deployment_spec_replicas{namespace="omnivise-iot",deployment="backend"}'
+        values: '1x20'
+      - series: 'kube_deployment_status_replicas_available{namespace="omnivise-iot",deployment="backend"}'
+        values: '1x20'
+      - series: 'kube_deployment_spec_replicas{namespace="other-team",deployment="x"}'
+        values: '3x20'
+      - series: 'kube_deployment_status_replicas_available{namespace="other-team",deployment="x"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: KubeDeploymentReplicasMismatch
+        exp_alerts: []
+
+  # --- KubeStatefulSetReplicasMismatch --------------------------------------
+  - name: KubeStatefulSetReplicasMismatch fires after 10 minutes of mismatch
+    interval: 1m
+    input_series:
+      - series: 'kube_statefulset_replicas{namespace="omnivise-iot",statefulset="mongo"}'
+        values: '1x20'
+      - series: 'kube_statefulset_status_replicas_ready{namespace="omnivise-iot",statefulset="mongo"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: KubeStatefulSetReplicasMismatch
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: omnivise-iot
+              statefulset: mongo
+            exp_annotations:
+              summary: StatefulSet replicas mismatch
+              description: "StatefulSet omnivise-iot/mongo has not matched its desired ready replica count for 10 minutes."
+
+  - name: KubeStatefulSetReplicasMismatch stays quiet for a short mismatch
+    interval: 1m
+    input_series:
+      - series: 'kube_statefulset_replicas{namespace="omnivise-iot",statefulset="mongo"}'
+        values: '1x20'
+      - series: 'kube_statefulset_status_replicas_ready{namespace="omnivise-iot",statefulset="mongo"}'
+        values: '0x4 1x16'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: KubeStatefulSetReplicasMismatch
+        exp_alerts: []
+
+  # --- Node conditions ------------------------------------------------------
+  - name: Node condition alerts fire
+    interval: 30s
+    input_series:
+      - series: 'kube_node_status_condition{node="node-1",condition="Ready",status="true"}'
+        values: '0x20'
+      - series: 'kube_node_status_condition{node="node-1",condition="MemoryPressure",status="true"}'
+        values: '1x20'
+      - series: 'kube_node_status_condition{node="node-1",condition="DiskPressure",status="true"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: KubeNodeNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              node: node-1
+              condition: Ready
+              status: "true"
+            exp_annotations:
+              summary: Node not ready
+              description: "Node node-1 has not been Ready for 5 minutes."
+      - eval_time: 6m
+        alertname: KubeNodeMemoryPressure
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              node: node-1
+              condition: MemoryPressure
+              status: "true"
+            exp_annotations:
+              summary: Node under memory pressure
+              description: "Node node-1 has reported MemoryPressure for 5 minutes."
+      - eval_time: 6m
+        alertname: KubeNodeDiskPressure
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              node: node-1
+              condition: DiskPressure
+              status: "true"
+            exp_annotations:
+              summary: Node under disk pressure
+              description: "Node node-1 has reported DiskPressure for 5 minutes."
+
+  - name: Node condition alerts stay quiet on a healthy node
+    interval: 30s
+    input_series:
+      - series: 'kube_node_status_condition{node="node-1",condition="Ready",status="true"}'
+        values: '1x20'
+      - series: 'kube_node_status_condition{node="node-1",condition="MemoryPressure",status="true"}'
+        values: '0x20'
+      - series: 'kube_node_status_condition{node="node-1",condition="DiskPressure",status="true"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: KubeNodeNotReady
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: KubeNodeMemoryPressure
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: KubeNodeDiskPressure
+        exp_alerts: []
+
+  # --- PrometheusRuleEvaluationFailures -------------------------------------
+  - name: PrometheusRuleEvaluationFailures fires on sustained failures
+    interval: 30s
+    input_series:
+      - series: 'prometheus_rule_evaluation_failures_total{job="prometheus",rule_group="/etc/rules/x.yaml;omnivise-platform"}'
+        values: '0+1x30'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: PrometheusRuleEvaluationFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: prometheus
+              rule_group: "/etc/rules/x.yaml;omnivise-platform"
+            exp_annotations:
+              summary: Prometheus rule evaluation failures
+              description: "Prometheus failed to evaluate rules in group /etc/rules/x.yaml;omnivise-platform during the last 5 minutes."
+
+  - name: PrometheusRuleEvaluationFailures stays quiet without failures
+    interval: 30s
+    input_series:
+      - series: 'prometheus_rule_evaluation_failures_total{job="prometheus",rule_group="/etc/rules/x.yaml;omnivise-platform"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: PrometheusRuleEvaluationFailures
+        exp_alerts: []

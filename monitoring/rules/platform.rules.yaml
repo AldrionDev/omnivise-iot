@@ -1,0 +1,99 @@
+# Technical/platform health alerts (promtool format). Injected into the chart's
+# additionalPrometheusRulesMap by scripts/render-content.sh — do not reference
+# sensor, reading or alert-threshold (domain) metrics here.
+#
+# Workload rules are scoped to the OmniVise namespaces because the homelab cluster
+# is shared; node and Prometheus rules are cluster-wide.
+groups:
+  - name: omnivise-platform
+    rules:
+      # The job alternation must equal the enabled jobs in ../expected-targets.yaml
+      # (checked by validate.sh). A job that is missing entirely is caught by the
+      # render cross-check and the acceptance run, not by this alert.
+      - alert: TargetDown
+        expr: up{job=~"apiserver|backend|coredns|grafana|kube-state-metrics|kubelet|node-exporter|prometheus|prometheus-operator"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Scrape target down
+          description: "Target {{ $labels.instance }} of job {{ $labels.job }} has been down for 5 minutes."
+
+      - alert: KubePodCrashLooping
+        expr: kube_pod_container_status_waiting_reason{namespace=~"omnivise-iot|monitoring",reason="CrashLoopBackOff"} == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Container is crash looping
+          description: "Container {{ $labels.container }} in pod {{ $labels.namespace }}/{{ $labels.pod }} has been in CrashLoopBackOff for 5 minutes."
+
+      # Fires only when a restart actually happened within the last 10 minutes AND the
+      # container's last termination reason is OOMKilled. kube_pod_container_status_last_terminated_reason
+      # alone stays at 1 until the next termination, so on its own it would fire
+      # indefinitely after a single historic OOM kill; restarts alone would also fire
+      # for non-OOM crashes.
+      - alert: ContainerOOMKilled
+        expr: |
+          (increase(kube_pod_container_status_restarts_total{namespace=~"omnivise-iot|monitoring"}[10m]) > 0)
+          and on (namespace, pod, container)
+          (kube_pod_container_status_last_terminated_reason{namespace=~"omnivise-iot|monitoring",reason="OOMKilled"} == 1)
+        labels:
+          severity: warning
+        annotations:
+          summary: Container was OOMKilled
+          description: "Container {{ $labels.container }} in pod {{ $labels.namespace }}/{{ $labels.pod }} restarted after being OOMKilled."
+
+      - alert: KubeDeploymentReplicasMismatch
+        expr: kube_deployment_spec_replicas{namespace=~"omnivise-iot|monitoring"} != kube_deployment_status_replicas_available{namespace=~"omnivise-iot|monitoring"}
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Deployment replicas mismatch
+          description: "Deployment {{ $labels.namespace }}/{{ $labels.deployment }} has not matched its desired replica count for 10 minutes."
+
+      - alert: KubeStatefulSetReplicasMismatch
+        expr: kube_statefulset_replicas{namespace=~"omnivise-iot|monitoring"} != kube_statefulset_status_replicas_ready{namespace=~"omnivise-iot|monitoring"}
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: StatefulSet replicas mismatch
+          description: "StatefulSet {{ $labels.namespace }}/{{ $labels.statefulset }} has not matched its desired ready replica count for 10 minutes."
+
+      - alert: KubeNodeNotReady
+        expr: kube_node_status_condition{condition="Ready",status="true"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Node not ready
+          description: "Node {{ $labels.node }} has not been Ready for 5 minutes."
+
+      - alert: KubeNodeMemoryPressure
+        expr: kube_node_status_condition{condition="MemoryPressure",status="true"} == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Node under memory pressure
+          description: "Node {{ $labels.node }} has reported MemoryPressure for 5 minutes."
+
+      - alert: KubeNodeDiskPressure
+        expr: kube_node_status_condition{condition="DiskPressure",status="true"} == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Node under disk pressure
+          description: "Node {{ $labels.node }} has reported DiskPressure for 5 minutes."
+
+      - alert: PrometheusRuleEvaluationFailures
+        expr: increase(prometheus_rule_evaluation_failures_total{job="prometheus"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Prometheus rule evaluation failures
+          description: "Prometheus failed to evaluate rules in group {{ $labels.rule_group }} during the last 5 minutes."

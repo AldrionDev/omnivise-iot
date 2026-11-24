@@ -1,0 +1,47 @@
+# Homelab (k3s) overrides. Storage (PVC ~5Gi local-path, retentionSize) is layered by the
+# infra/homelab-monitoring Terraform root (#146), which cannot edit this file.
+#
+# Requests/limits are INITIAL sizing values, not accepted capacity: the homelab
+# footprint is measured in #147 and AWS sizing is refined in #148/#149.
+# Every rendered container must carry cpu+memory requests and limits (validate.sh).
+
+prometheus:
+  prometheusSpec:
+    retention: 7d
+    resources:
+      requests: {cpu: 100m, memory: 512Mi}
+      limits: {cpu: 500m, memory: 1Gi}
+
+prometheusOperator:
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: 200m, memory: 128Mi}
+  # Applied by the operator to the Prometheus config-reloader (sidecar and init container).
+  prometheusConfigReloader:
+    resources:
+      requests: {cpu: 10m, memory: 25Mi}
+      limits: {cpu: 50m, memory: 50Mi}
+
+grafana:
+  resources:
+    requests: {cpu: 50m, memory: 128Mi}
+    limits: {cpu: 250m, memory: 256Mi}
+  sidecar:
+    resources:
+      requests: {cpu: 10m, memory: 64Mi}
+      limits: {cpu: 100m, memory: 128Mi}
+  # Init container the grafana chart adds whenever `dashboards` is set (inline JSON included).
+  downloadDashboards:
+    resources:
+      requests: {cpu: 10m, memory: 32Mi}
+      limits: {cpu: 50m, memory: 64Mi}
+
+kube-state-metrics:
+  resources:
+    requests: {cpu: 20m, memory: 64Mi}
+    limits: {cpu: 100m, memory: 128Mi}
+
+prometheus-node-exporter:
+  resources:
+    requests: {cpu: 20m, memory: 32Mi}
+    limits: {cpu: 100m, memory: 64Mi}

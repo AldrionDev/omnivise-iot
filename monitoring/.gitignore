@@ -1,0 +1,3 @@
+# Local validation toolchain and verified chart cache (see scripts/install-tools.sh, scripts/fetch-chart.sh).
+.tools/
+.cache/

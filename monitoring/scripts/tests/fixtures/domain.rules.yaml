@@ -1,0 +1,12 @@
+# Self-test fixture: a domain (sensor value) rule that the policy must reject.
+groups:
+  - name: domain-fixture
+    rules:
+      - alert: SensorValueHigh
+        expr: max(omnivise_sensor_reading_value) > 50
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: Sensor value high
+          description: Domain alert that must never be in the platform rule set.
