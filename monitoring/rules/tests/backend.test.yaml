@@ -1,0 +1,47 @@
+# promtool unit tests for ../backend.rules.yaml.
+rule_files:
+  - ../backend.rules.yaml
+
+evaluation_interval: 30s
+
+tests:
+  - name: BackendHighErrorRatio fires when 50% of requests fail for 10 minutes
+    interval: 30s
+    input_series:
+      - series: 'jetty_server_requests_seconds_count{job="backend",method="GET",outcome="SERVER_ERROR",status="500",uri="/api/alerts",exception="none"}'
+        values: '0+10x60'
+      - series: 'jetty_server_requests_seconds_count{job="backend",method="GET",outcome="SUCCESS",status="200",uri="/api/alerts",exception="none"}'
+        values: '0+10x60'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: BackendHighErrorRatio
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: Backend 5xx ratio above 5%
+              description: "More than 5% of backend HTTP requests returned 5xx for 10 minutes."
+
+  - name: BackendHighErrorRatio stays quiet below the 5% threshold
+    interval: 30s
+    input_series:
+      - series: 'jetty_server_requests_seconds_count{job="backend",method="GET",outcome="SERVER_ERROR",status="500",uri="/api/alerts",exception="none"}'
+        values: '0+1x60'
+      - series: 'jetty_server_requests_seconds_count{job="backend",method="GET",outcome="SUCCESS",status="200",uri="/api/alerts",exception="none"}'
+        values: '0+99x60'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: BackendHighErrorRatio
+        exp_alerts: []
+
+  - name: BackendHighErrorRatio stays quiet with zero traffic (NaN ratio)
+    interval: 30s
+    input_series:
+      - series: 'jetty_server_requests_seconds_count{job="backend",method="GET",outcome="SERVER_ERROR",status="500",uri="/api/alerts",exception="none"}'
+        values: '5x60'
+      - series: 'jetty_server_requests_seconds_count{job="backend",method="GET",outcome="SUCCESS",status="200",uri="/api/alerts",exception="none"}'
+        values: '20x60'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: BackendHighErrorRatio
+        exp_alerts: []

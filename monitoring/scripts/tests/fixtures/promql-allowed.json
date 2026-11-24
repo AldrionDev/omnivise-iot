@@ -1,0 +1,19 @@
+[
+  {"source": "plain selector", "expr": "up"},
+  {"source": "matchers incl. metric-like string", "expr": "up{job=~\"backend|kubelet\", instance!=\"omnivise_sensor_reading_value\"} == 0"},
+  {"source": "aggregation with by after", "expr": "sum(rate(jetty_server_requests_seconds_count{status=~\"5..\"}[5m])) by (uri)"},
+  {"source": "aggregation with by before", "expr": "sum by (le) (rate(jetty_server_requests_seconds_bucket[$__rate_interval]))"},
+  {"source": "without", "expr": "max without (instance, pod) (jvm_memory_used_bytes{area=\"heap\"})"},
+  {"source": "histogram_quantile", "expr": "histogram_quantile(0.95, sum by (le) (rate(jetty_server_requests_seconds_bucket[5m])))"},
+  {"source": "vector matching", "expr": "(increase(kube_pod_container_status_restarts_total[10m]) > 0) and on (namespace, pod, container) (kube_pod_container_status_last_terminated_reason{reason=\"OOMKilled\"} == 1)"},
+  {"source": "group_left with labels", "expr": "kube_pod_info * on (namespace, pod) group_left (node) kube_pod_status_ready"},
+  {"source": "group_left without labels", "expr": "kube_pod_info * on (namespace, pod) group_left kube_pod_status_ready"},
+  {"source": "offset", "expr": "rate(node_cpu_seconds_total{mode=\"idle\"}[5m] offset 1h)"},
+  {"source": "subquery", "expr": "max_over_time(rate(container_cpu_usage_seconds_total[1m])[30m:1m])"},
+  {"source": "at modifier", "expr": "prometheus_tsdb_head_series @ end()"},
+  {"source": "label_replace strings", "expr": "label_replace(up, \"dst\", \"$1\", \"job\", \"(.*)\")"},
+  {"source": "topk and bool", "expr": "topk(5, process_cpu_usage) > bool 0.5"},
+  {"source": "scientific number and NaN", "expr": "node_memory_MemTotal_bytes > 1e9 or vector(NaN)"},
+  {"source": "comment", "expr": "up # trailing comment with omnivise_sensor_reading_value\n == 1"},
+  {"source": "multiline binary", "expr": "sum(rate(jetty_server_requests_seconds_count{status=~\"5..\"}[5m]))\n/\nsum(rate(jetty_server_requests_seconds_count[5m]))\n> 0.05"}
+]

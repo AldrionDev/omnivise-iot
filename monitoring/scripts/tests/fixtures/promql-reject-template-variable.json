@@ -1,0 +1,1 @@
+[{"source": "template variable outside matcher", "reason": "template variable outside", "expr": "up > $threshold"}]

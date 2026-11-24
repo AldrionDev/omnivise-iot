@@ -1,0 +1,81 @@
+# Expected-target contract per environment.
+#
+# enabled:  every ServiceMonitor the chart must render, and the effective Prometheus
+#           `job` label it must produce. validate.sh derives the job from the rendered
+#           ServiceMonitor (explicit `job` relabeling, else the rendered Service's
+#           `jobLabel` value, else the Service name) and compares it to `job`.
+#           The rendered ServiceMonitor set must equal this list exactly, and the
+#           TargetDown alert's job alternation must equal the set of `job` values.
+# disabled: jobs intentionally not scraped. No ServiceMonitor may be rendered for
+#           them; serviceMonitorPattern (optional, regex on the rendered name) is an
+#           additional guard.
+#
+# Release name `kube-prometheus-stack` is part of this contract (ServiceMonitor names
+# derive from it); see versions.yaml `helmRelease`.
+
+enabledCommon: &enabled
+  - job: apiserver
+    serviceMonitor: kube-prometheus-stack-apiserver
+    rationale: Kubernetes API server health; job pinned by explicit relabeling (default/kubernetes Service is not chart-rendered).
+  - job: kubelet
+    serviceMonitor: kube-prometheus-stack-kubelet
+    rationale: Kubelet, cAdvisor and probe metrics; job pinned by explicit relabeling (operator-managed kubelet Service is not chart-rendered).
+  - job: kube-state-metrics
+    serviceMonitor: kube-prometheus-stack-kube-state-metrics
+    rationale: Workload and node object state for the platform rules and dashboard.
+  - job: node-exporter
+    serviceMonitor: kube-prometheus-stack-prometheus-node-exporter
+    rationale: Node CPU, memory and filesystem metrics.
+  - job: coredns
+    serviceMonitor: kube-prometheus-stack-coredns
+    rationale: Cluster DNS health; k3s and the EKS CoreDNS add-on expose :9153 on pods labelled k8s-app=kube-dns.
+  - job: prometheus
+    serviceMonitor: kube-prometheus-stack-prometheus
+    rationale: Prometheus self-monitoring (TSDB, rule evaluation); job pinned by explicit relabeling.
+  - job: prometheus-operator
+    serviceMonitor: kube-prometheus-stack-operator
+    rationale: Prometheus Operator reconciliation health; job pinned by explicit relabeling.
+  - job: grafana
+    serviceMonitor: kube-prometheus-stack-grafana
+    rationale: Grafana health; job pinned by explicit relabeling.
+  - job: backend
+    serviceMonitor: backend
+    rationale: OmniVise backend /metrics (I1 contract, Service backend:http in omnivise-iot); job pinned by explicit relabeling.
+
+environments:
+  homelab:
+    enabled: *enabled
+    disabled:
+      - job: kube-etcd
+        serviceMonitorPattern: "kube-etcd$"
+        rationale: Embedded in the k3s server process; no scrapeable etcd workload.
+      - job: kube-scheduler
+        serviceMonitorPattern: "kube-scheduler$"
+        rationale: Embedded in the k3s server process.
+      - job: kube-controller-manager
+        serviceMonitorPattern: "kube-controller-manager$"
+        rationale: Embedded in the k3s server process.
+      - job: kube-proxy
+        serviceMonitorPattern: "kube-proxy$"
+        rationale: Embedded in the k3s agent process.
+      - job: alertmanager
+        serviceMonitorPattern: "alertmanager$"
+        rationale: Alertmanager is not deployed in monitoring M1 (no notifications).
+  aws:
+    enabled: *enabled
+    disabled:
+      - job: kube-etcd
+        serviceMonitorPattern: "kube-etcd$"
+        rationale: Managed by the EKS control plane; not reachable from the cluster.
+      - job: kube-scheduler
+        serviceMonitorPattern: "kube-scheduler$"
+        rationale: Managed by the EKS control plane; not reachable from the cluster.
+      - job: kube-controller-manager
+        serviceMonitorPattern: "kube-controller-manager$"
+        rationale: Managed by the EKS control plane; not reachable from the cluster.
+      - job: kube-proxy
+        serviceMonitorPattern: "kube-proxy$"
+        rationale: EKS-managed add-on; disabled by the shared base contract (#145 scope), not scraped in M1.
+      - job: alertmanager
+        serviceMonitorPattern: "alertmanager$"
+        rationale: Alertmanager is not deployed in monitoring M1 (no notifications).

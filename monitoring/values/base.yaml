@@ -1,0 +1,160 @@
+# Shared monitoring semantics for kube-prometheus-stack (pinned in ../versions.yaml).
+#
+# Merge order (contract, used by CI and by the Terraform roots):
+#   base.yaml -> <env>.yaml -> generated/content.yaml
+# Helm release name: kube-prometheus-stack, namespace: monitoring.
+# Environment sizing (requests/limits, retention) lives in <env>.yaml;
+# storage lives with the infrastructure owner (#146 homelab, #148 AWS).
+# See docs/monitoring-architecture.md.
+
+# CRDs are owned outside this release (prometheus-operator-crds chart or external owner).
+crds:
+  enabled: false
+
+# Repository-owned rules only; the chart's default rule set is disabled.
+defaultRules:
+  create: false
+
+alertmanager:
+  enabled: false
+
+# Embedded in k3s / managed by EKS: not scrapeable as cluster workloads.
+kubeEtcd:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeProxy:
+  enabled: false
+
+coreDns:
+  enabled: true
+
+# Stable job label contract: targets whose Service is not rendered by this chart
+# (apiserver, kubelet) or whose Service name is release-derived (prometheus,
+# operator, grafana) get an explicit `job` relabeling. Operator-generated relabel
+# configs run first; endpoint relabelings are appended and therefore win.
+kubeApiServer:
+  serviceMonitor:
+    relabelings:
+      - action: replace
+        targetLabel: job
+        replacement: apiserver
+
+kubelet:
+  serviceMonitor:
+    # The chart defaults (metrics_path) are kept; lists are replaced on override.
+    relabelings:
+      - action: replace
+        sourceLabels: [__metrics_path__]
+        targetLabel: metrics_path
+      - action: replace
+        targetLabel: job
+        replacement: kubelet
+    cAdvisorRelabelings:
+      - action: replace
+        sourceLabels: [__metrics_path__]
+        targetLabel: metrics_path
+      - action: replace
+        targetLabel: job
+        replacement: kubelet
+    probesRelabelings:
+      - action: replace
+        sourceLabels: [__metrics_path__]
+        targetLabel: metrics_path
+      - action: replace
+        targetLabel: job
+        replacement: kubelet
+    resourceRelabelings:
+      - action: replace
+        sourceLabels: [__metrics_path__]
+        targetLabel: metrics_path
+      - action: replace
+        targetLabel: job
+        replacement: kubelet
+
+prometheusOperator:
+  # No cluster-scoped admission webhooks or certgen hook Jobs on a shared cluster.
+  # Operator TLS must be off as well: without the webhook patch job nothing creates its secret.
+  admissionWebhooks:
+    enabled: false
+  tls:
+    enabled: false
+  # Reconcile only instances in the monitoring namespace, never another owner's CRs.
+  prometheusInstanceNamespaces: [monitoring]
+  alertmanagerInstanceNamespaces: [monitoring]
+  alertmanagerConfigNamespaces: [monitoring]
+  thanosRulerInstanceNamespaces: [monitoring]
+  serviceMonitor:
+    relabelings:
+      - action: replace
+        targetLabel: job
+        replacement: prometheus-operator
+
+prometheus:
+  serviceMonitor:
+    relabelings:
+      - action: replace
+        targetLabel: job
+        replacement: prometheus
+  # Verified key for kube-prometheus-stack 93.9.0 (map form).
+  additionalServiceMonitors:
+    backend:
+      selector:
+        matchLabels:
+          app.kubernetes.io/name: backend
+          app.kubernetes.io/component: api
+      namespaceSelector:
+        matchNames: [omnivise-iot]
+      endpoints:
+        - port: http
+          path: /metrics
+          relabelings:
+            - action: replace
+              targetLabel: job
+              replacement: backend
+  prometheusSpec:
+    scrapeInterval: 30s
+    evaluationInterval: 30s
+
+grafana:
+  defaultDashboardsEnabled: false
+  testFramework:
+    enabled: false
+  service:
+    type: ClusterIP
+  ingress:
+    enabled: false
+  # The Secret is provisioned outside Git and Terraform state; only its name and keys are referenced.
+  admin:
+    existingSecret: grafana-admin
+    userKey: admin-user
+    passwordKey: admin-password
+  grafana.ini:
+    auth.anonymous:
+      enabled: false
+  sidecar:
+    # Dashboards are provisioned inline from generated/content.yaml; no cluster-wide ConfigMap watch.
+    dashboards:
+      enabled: false
+    datasources:
+      alertmanager:
+        enabled: false
+  serviceMonitor:
+    relabelings:
+      - action: replace
+        targetLabel: job
+        replacement: grafana
+  dashboardProviders:
+    dashboardproviders.yaml:
+      apiVersion: 1
+      providers:
+        - name: omnivise
+          orgId: 1
+          folder: OmniVise
+          type: file
+          disableDeletion: true
+          editable: false
+          options:
+            path: /var/lib/grafana/dashboards/omnivise

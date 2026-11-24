@@ -1,0 +1,35 @@
+helmRelease:
+  name: kube-prometheus-stack
+  namespace: monitoring
+
+kubePrometheusStack:
+  chart: kube-prometheus-stack
+  repository: prometheus-community
+  repositoryUrl: https://prometheus-community.github.io/helm-charts
+  version: 93.9.0
+  appVersion: v0.95.2
+  sha256: b45d041d3f97c645c13dabc5d54af4cb1409644317b81eb2490be20cb2d6e718
+
+prometheusOperatorCrds:
+  chart: prometheus-operator-crds
+  repository: prometheus-community
+  repositoryUrl: https://prometheus-community.github.io/helm-charts
+  version: 33.0.2
+  appVersion: v0.95.2
+  sha256: deb80119aa72342845776db1ed004714ce87cbc807d9eecaa72f4837ee5f79f5
+
+kubernetesCompatibility:
+  stackConstraint: ">=1.25.0-0"
+  eksTarget: "1.36"
+  # Established by the homelab CRD/monitoring gate (#146); conditional until then.
+  homelabTarget: null
+
+# Validation toolchain (linux-amd64). Keep this block flat: install-tools.sh reads
+# it with awk before yq is available.
+tooling:
+  helmVersion: 3.22.1
+  helmSha256: 896cf63684a42a723d61c980369d6e588330927deb13676ca0d85006dd6da0ea
+  prometheusVersion: 3.16.0
+  prometheusSha256: 68727009472a2c02e1ff7f062fd5b3e637285bffc8fc2d340c76fb449d6e0f34
+  yqVersion: 4.54.3
+  yqSha256: 129534601871538efe0ba4c5e62a34fb1d5f469bcb975c4fddeb467d82974973

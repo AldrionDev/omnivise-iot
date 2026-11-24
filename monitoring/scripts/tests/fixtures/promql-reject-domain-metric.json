@@ -1,0 +1,1 @@
+[{"source": "domain metric", "reason": "metric 'omnivise_sensor_reading_value' is not on the allowlist", "expr": "avg(omnivise_sensor_reading_value{deviceId=\"d-01\"}) > 50"}]

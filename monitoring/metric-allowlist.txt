@@ -1,0 +1,13 @@
+# Metric names that repository-owned rules and dashboards may reference.
+# Technical/platform health only: no sensor, reading, device or alert-threshold
+# (domain) metrics. One entry per line: an exact name, or a prefix ending in '*'.
+# Enforced by monitoring/scripts/promql_policy.py (fail-closed).
+up
+kube_*
+node_*
+kubelet_*
+container_*
+prometheus_*
+jetty_server_requests_seconds_*
+jvm_*
+process_*
